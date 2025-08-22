@@ -1,4 +1,4 @@
-package com.syncnest.userservice.model;
+package com.syncnest.userservice.dto;
 
 
 import com.fasterxml.jackson.annotation.JsonInclude;

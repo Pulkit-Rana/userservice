@@ -1,6 +1,5 @@
 package com.syncnest.userservice.entity;
 
-import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Email;
@@ -14,7 +13,6 @@ import org.springframework.security.core.userdetails.UserDetails;
 import java.io.Serial;
 import java.io.Serializable;
 import java.security.Principal;
-import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Set;
 
@@ -71,9 +69,6 @@ public class User extends BaseEntity implements UserDetails, Principal, Serializ
     @Column(name = "provider_id", length = 100)
     private String providerId;
 
-    @Column
-    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-    private LocalDateTime lastLoginDate;
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {

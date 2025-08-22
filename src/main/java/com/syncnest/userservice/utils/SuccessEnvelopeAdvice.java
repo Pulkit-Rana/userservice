@@ -1,6 +1,6 @@
 package com.syncnest.userservice.utils;
 
-import com.syncnest.userservice.model.ApiResponse;
+import com.syncnest.userservice.dto.ApiResponse;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.*;
 import org.springframework.http.converter.HttpMessageConverter;

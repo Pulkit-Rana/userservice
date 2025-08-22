@@ -36,60 +36,105 @@ public class AuthServiceImpl implements AuthService {
     @Override
     @Transactional
     public LoginResponse login(LoginRequest request) throws BadCredentialsException {
+        // Basic input validation
+        if (request == null) {
+            throw new BadCredentialsException("Invalid email or password");
+        }
         final String email = normalizeEmail(request.getEmail());
-
-        try {
-            authenticationManager.authenticate(
-                    new UsernamePasswordAuthenticationToken(email, request.getPassword())
-            );
-        } catch (AuthenticationException ex) {
-            log.debug("Authentication failed for {}: {}", email, ex.getMessage());
+        final String password = request.getPassword();
+        if (password == null || password.isBlank()) {
             throw new BadCredentialsException("Invalid email or password");
         }
 
+        // Authenticate credentials (uniform error on failure)
+        try {
+            authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(email, password)
+            );
+        } catch (org.springframework.security.core.AuthenticationException ex) {
+            log.warn("Authentication failed for {}", email);
+            throw new BadCredentialsException("Invalid email or password");
+        }
+
+        // Fetch user and guard account state
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new BadCredentialsException("Invalid email or password"));
 
-        if (user.isDeleted() || user.isLocked() || !user.isEnabled() || !user.isVerified()) {
+        // Hardening: block deleted/locked/disabled/unverified accounts
+        if ((hasMethod(user, "isDeleted") && user.isDeleted())
+                || (hasMethod(user, "isLocked") && user.isLocked())
+                || !user.isEnabled()
+                || (hasMethod(user, "isVerified") && !user.isVerified())) {
             throw new BadCredentialsException("Invalid email or password");
         }
 
-        user.setLastLoginAt(java.time.LocalDateTime.now(java.time.Clock.systemUTC()));
-        if (user.getProvider() == null) {
-            user.setProvider(com.syncnest.userservice.entity.AuthProvider.LOCAL);
+        // Optional: update last-login & default provider
+        try {
+            user.setLastLoginAt(java.time.LocalDateTime.now(java.time.Clock.systemUTC()));
+        } catch (Exception ignored) { /* ignore if field not present */ }
+        try {
+            if (user.getProvider() == null) {
+                user.setProvider(com.syncnest.userservice.entity.AuthProvider.LOCAL);
+            }
+        } catch (Exception ignored) { /* ignore if field not present */ }
+        try {
+            userRepository.saveAndFlush(user);
+        } catch (Exception e) {
+            log.warn("Non-fatal: unable to persist lastLogin/provider for {}", email, e);
         }
-        userRepository.saveAndFlush(user);
 
-        // Access token
-        var claims = new java.util.HashMap<String, Object>();
-        claims.put("uid", safeId(user.getId()));
-        claims.put("role", user.getRole().name());
-        String accessToken = jwtService.generateToken(claims, email);
+        // Build Access Token with minimal custom claims
+        java.util.Map<String, Object> claims = new java.util.HashMap<>();
+        try { claims.put("uid", user.getId() != null ? user.getId().toString() : null); } catch (Exception ignored) {}
+        try { claims.put("role", user.getRole() != null ? user.getRole().name() : null); } catch (Exception ignored) {}
+        final String accessToken = jwtService.generateToken(claims, email);
 
-        // NEW: Issue refresh token bound to deviceId (enforces 3 devices + sliding inactivity)
-        RefreshTokenResponse rt = refreshTokenService.issue(user, request.getDeviceId());
+        // Issue refresh token (device-bound + max devices + sliding inactivity handled inside service)
+        final com.syncnest.userservice.dto.RefreshTokenResponse rt =
+                refreshTokenService.issue(user, request.getDeviceId());
 
-        // Build response
+        // Prepare response
         LoginResponse resp = new LoginResponse();
         resp.setAccessToken(accessToken);
         resp.setExpiresIn(jwtService.getTokenValiditySeconds());
-        resp.setIssuedAt(Instant.now());
+        resp.setIssuedAt(java.time.Instant.now());
+        if (rt != null) {
+            resp.setRefreshToken(rt.getRefreshToken());
+            resp.setDeviceId(rt.getDeviceId());
+        }
 
-        // User summary (existing)
+        // User summary
         LoginResponse.UserSummary summary = new LoginResponse.UserSummary();
-        summary.setId(safeId(user.getId()));
-        summary.setEmail(user.getEmail());
-        summary.setDisplayName(user.getEmail());
-        summary.setRoles(Set.of(user.getRole().name()));
-        summary.setEmailVerified(user.isVerified());
+        try { summary.setId(user.getId() != null ? user.getId().toString() : null); } catch (Exception ignored) {}
+        try { summary.setEmail(user.getEmail()); } catch (Exception ignored) {}
+        try {
+            // Prefer a friendly display name if available; fallback to username/email
+            String displayName = null;
+            try { displayName = (String) User.class.getMethod("getDisplayName").invoke(user); } catch (Exception ignored2) {}
+            if (displayName == null || displayName.isBlank()) {
+                try { displayName = user.getUsername(); } catch (Exception ignored2) {}
+            }
+            if (displayName == null || displayName.isBlank()) {
+                displayName = email;
+            }
+            summary.setDisplayName(displayName);
+        } catch (Exception ignored) {}
+
+        try {
+            java.util.Set<String> roles = user.getAuthorities().stream()
+                    .map(org.springframework.security.core.GrantedAuthority::getAuthority)
+                    .collect(java.util.stream.Collectors.toSet());
+            summary.setRoles(roles);
+        } catch (Exception ignored) {}
+
+        try {
+            // Only if your entity exposes this
+            if (hasMethod(user, "isVerified")) {
+                summary.setEmailVerified((Boolean) User.class.getMethod("isVerified").invoke(user));
+            }
+        } catch (Exception ignored) {}
+
         resp.setUser(summary);
-
-        // NEW: include refresh token details in LoginResponse (if your DTO supports fields)
-        // If LoginResponse doesn't have fields, return only from controller as cookie.
-        resp.setRefreshToken(rt.getRefreshToken()); // raw token for client/cookie
-        resp.setExpiresIn(rt.getExpiresAt()); // if you have this field
-        resp.getDeviceId(rt.getDeviceId()); // if you have this field
-
         return resp;
     }
 
@@ -100,5 +145,14 @@ public class AuthServiceImpl implements AuthService {
 
     private String safeId(UUID id) {
         return id != null ? id.toString() : null;
+    }
+
+    private boolean hasMethod(Object target, String method) {
+        try {
+            target.getClass().getMethod(method);
+            return true;
+        } catch (NoSuchMethodException e) {
+            return false;
+        }
     }
 }

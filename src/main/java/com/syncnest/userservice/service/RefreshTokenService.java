@@ -3,6 +3,9 @@ package com.syncnest.userservice.service;
 import com.syncnest.userservice.dto.RefreshTokenRequest;
 import com.syncnest.userservice.dto.RefreshTokenResponse;
 import com.syncnest.userservice.entity.User;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
 
 public interface RefreshTokenService {
 
@@ -20,4 +23,7 @@ public interface RefreshTokenService {
 
     /** Housekeeping: delete expired or revoked rows. */
     void purgeExpiredAndRevoked();
+
+    @Transactional
+    void purgeExpiredAndRevoked(Instant now);
 }

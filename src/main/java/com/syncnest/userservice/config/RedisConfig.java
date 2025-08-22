@@ -2,6 +2,7 @@ package com.syncnest.userservice.config;
 
 import io.lettuce.core.ClientOptions;
 import io.lettuce.core.TimeoutOptions;
+import io.lettuce.core.api.StatefulConnection; // <-- IMPORTANT
 import io.lettuce.core.resource.DefaultClientResources;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
@@ -34,7 +35,8 @@ public class RedisConfig {
     @Bean
     public LettuceConnectionFactory redisConnectionFactory(RedisProperties props,
                                                            DefaultClientResources clientResources) {
-        // Standalone
+
+        // --- Standalone ---
         RedisStandaloneConfiguration standalone = new RedisStandaloneConfiguration();
         standalone.setHostName(props.getHost());
         standalone.setPort(props.getPort());
@@ -46,27 +48,39 @@ public class RedisConfig {
             standalone.setPassword(RedisPassword.of(props.getPassword()));
         }
 
-        // Pool (compatible with older commons-pool2)
-        GenericObjectPoolConfig<Object> pool = new GenericObjectPoolConfig<>();
+        // --- Pool: MUST be typed to StatefulConnection<?, ?> ---
+        GenericObjectPoolConfig<StatefulConnection<?, ?>> pool = new GenericObjectPoolConfig<>();
         if (props.getLettuce() != null && props.getLettuce().getPool() != null) {
             var p = props.getLettuce().getPool();
-            pool.setMaxTotal(p.getMaxActive());   // primitives in some Boot versions
+            // Depending on Spring Boot version, only one of these may exist.
+            // Prefer getMaxActive() if present; otherwise getMaxTotal().
+            try {
+                pool.setMaxTotal(p.getMaxActive());
+            } catch (NoSuchMethodError e) {
+                // For newer Boot versions where getMaxActive() was replaced:
+                try {
+                    var m = p.getClass().getMethod("getMaxTotal");
+                    Object v = m.invoke(p);
+                    if (v instanceof Integer) pool.setMaxTotal((Integer) v);
+                } catch (Exception ignore) { /* fall back to defaults */ }
+            }
             pool.setMaxIdle(p.getMaxIdle());
             pool.setMinIdle(p.getMinIdle());
-            // DO NOT call setMaxWait(...) to avoid signature differences across pool2 versions
+            // avoid setMaxWait due to signature differences across commons-pool2
         } else {
             pool.setMaxTotal(32);
             pool.setMaxIdle(16);
             pool.setMinIdle(2);
             pool.setTestOnBorrow(true);
-            // DO NOT call setTestOnCreate(...) for widest compatibility
             pool.setTestWhileIdle(true);
         }
 
+        // --- Timeouts / SSL ---
         Duration cmdTimeout = (props.getTimeout() != null) ? props.getTimeout() : Duration.ofSeconds(5);
-        boolean useSsl = resolveSsl(props); // handles isSsl(), getSsl():Boolean, getSsl().isEnabled()
+        boolean useSsl = resolveSsl(props);
 
-        LettuceClientConfiguration clientConfig =
+        // --- Lettuce client configuration builder ---
+        LettucePoolingClientConfiguration.LettucePoolingClientConfigurationBuilder builder =
                 LettucePoolingClientConfiguration.builder()
                         .clientResources(clientResources)
                         .commandTimeout(cmdTimeout)
@@ -76,10 +90,14 @@ public class RedisConfig {
                                 .disconnectedBehavior(ClientOptions.DisconnectedBehavior.DEFAULT)
                                 .timeoutOptions(TimeoutOptions.enabled())
                                 .build())
-                        .useSsl(useSsl)
-                        .poolConfig(pool)
-                        .build();
+                        .poolConfig(pool);
 
+        // Your Lettuce builder exposes only the no-arg method; call conditionally.
+        if (useSsl) {
+            builder.useSsl(); // no-arg
+        }
+
+        LettuceClientConfiguration clientConfig = builder.build();
         return new LettuceConnectionFactory(standalone, clientConfig);
     }
 
@@ -126,9 +144,7 @@ public class RedisConfig {
                 Method mGet = RedisProperties.class.getMethod("getSsl");
                 Object sslObj = mGet.invoke(props);
                 if (sslObj == null) return false;
-                // Case A: getSsl(): Boolean
                 if (sslObj instanceof Boolean b) return b;
-                // Case B: getSsl(): <SslObject> with isEnabled()
                 try {
                     Method mEnabled = sslObj.getClass().getMethod("isEnabled");
                     Object en = mEnabled.invoke(sslObj);

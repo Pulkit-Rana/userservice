@@ -32,7 +32,8 @@ dependencies {
     implementation('org.apache.commons:commons-lang3:3.18.0')
     runtimeOnly group: 'io.jsonwebtoken', name: 'jjwt-impl', version: '0.12.6'
     runtimeOnly group: 'io.jsonwebtoken', name: 'jjwt-jackson', version: '0.12.6'
-    implementation group: 'org.springframework.boot', name: 'spring-boot-starter-data-redis', version: '3.4.0'
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    implementation 'org.apache.commons:commons-pool2'
     implementation("org.springframework.boot:spring-boot-starter-mail:3.5.0")
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.1.0'
     testImplementation group: 'software.amazon.awssdk', name: 's3', version: '2.30.6'

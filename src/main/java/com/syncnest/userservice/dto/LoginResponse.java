@@ -13,6 +13,7 @@ public class LoginResponse {
     private String accessToken;
     private long expiresIn;
     private String refreshToken;
+    private String deviceId;
     private Instant issuedAt;
     private UserSummary user;
 

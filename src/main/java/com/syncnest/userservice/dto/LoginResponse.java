@@ -24,6 +24,5 @@ public class LoginResponse {
         private String displayName;
         private Set<String> roles;
         private boolean emailVerified;
-        private boolean mfaEnabled;
     }
 }

@@ -19,13 +19,6 @@ public class UserServiceImpl implements UserDetailsService {
 
     private final UserRepository userRepository;
 
-    /**
-     * Loads a user by email (case-insensitive).
-     * Caches successful lookups to reduce DB load.
-     * NOTE: We intentionally throw UsernameNotFoundException for all blocking states
-     * to avoid user enumeration. DaoAuthenticationProvider#setHideUserNotFoundExceptions(true)
-     * in your SecurityConfig keeps responses uniform.
-     */
     @Override
     @Transactional(readOnly = true)
     @Cacheable(

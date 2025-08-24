@@ -24,7 +24,6 @@ public class UserServiceImpl implements UserDetailsService {
     @Cacheable(
             cacheNames = CacheConfig.USER_DETAILS_BY_EMAIL,
             keyGenerator = "lowerCaseStringKeyGenerator",
-            unless = "#result == null",
             sync = true
     )
     public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {

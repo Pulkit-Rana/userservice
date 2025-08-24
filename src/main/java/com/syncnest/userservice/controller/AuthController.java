@@ -23,16 +23,18 @@ public class AuthController {
         LoginResponse response = authService.login(request);
 
         // Move refresh token to HttpOnly cookie (remove from body if your DTO had it)
-        ResponseCookie rtCookie = ResponseCookie.from("rt", response.getRefreshToken())
+        ResponseCookie rtCookie = ResponseCookie.from("refreshToken", response.getRefreshToken())
                 .httpOnly(true).secure(true).sameSite("Strict")
-                .path("/").maxAge(Duration.ofDays(30)).build();
+                .path("/").maxAge(Duration.ofDays(30))
+                .build();
 
-        // Don’t echo refresh in body:
+// Do not echo refresh token in body:
         response.setRefreshToken(null);
 
         return ResponseEntity.ok()
                 .header(HttpHeaders.SET_COOKIE, rtCookie.toString())
                 .body(response);
+
     }
 
 }

@@ -148,7 +148,7 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
     @Transactional
     @Override
     public void purgeExpiredAndRevoked(Instant now) {
-        refreshTokenRepo.deleteAllByExpiresAtBeforeOrRevokedTrue(Instant.now(), true);
+        refreshTokenRepo.deleteAllByExpiresAtBeforeOrRevokedTrue(Instant.now());
     }
 
     // =========================== INTERNALS ===========================

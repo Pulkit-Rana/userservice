@@ -20,77 +20,128 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class TokenBlacklistConfig {
 
-    private static final String KEY_PREFIX = "jwt:bl:";   // blacklist namespace
-    private static final long   SKEW_MS    = 5_000L;      // small safety skew
+    private static final String KEY_PREFIX = "jwt:bl:";     // blacklist namespace
+    private static final long   SKEW_MS    = 5_000L;        // safety skew
+    private static final long   MIN_TTL_MS = 100L;          // clamp very short TTLs
 
-    private final StringRedisTemplate redis;              // faster for String values
-    private final JwtTokenProviderConfig jwtService;      // our provider (with extractClaim)
+    private final StringRedisTemplate redis;
+    private final JwtTokenProviderConfig jwtService;
 
-    /**
-     * Blacklist a token until its expiration. Uses jti when present (preferred),
-     * otherwise falls back to SHA-256(token).
-     */
+    /** Blacklist a token until its expiration. Prefer JTI; fallback to SHA-256(token). */
     public void addToBlacklist(@NonNull String token) {
         try {
-            // Skip obviously bad tokens fast
-            if (token.isBlank() || jwtService.isTokenExpired(token)) return;
+            if (token.isBlank()) return;
 
-            // TTL based on token's exp
+            // Parse once; avoid double work
             Date exp = jwtService.extractExpiration(token);
-            if (exp == null) return; // defensive
+            if (exp == null) return;
+
             long ttlMs = (exp.getTime() - System.currentTimeMillis()) - SKEW_MS;
             if (ttlMs <= 0) return;
+            if (ttlMs < MIN_TTL_MS) ttlMs = MIN_TTL_MS;
 
-            // Prefer JTI; fallback to hash
             String jti = safe(jwtService.extractClaim(token, Claims::getId));
-            String key = KEY_PREFIX + (jti != null ? ("jti:" + jti) : ("sha:" + sha256Url(token)));
+            String iss = safe(jwtService.extractClaim(token, Claims::getIssuer));
 
-            // Store a tiny value; presence of key is what matters
+            String key = buildKey(jti, iss, token);
+            // Presence is what matters; value is tiny
             redis.opsForValue().set(key, "1", ttlMs, TimeUnit.MILLISECONDS);
         } catch (IllegalArgumentException e) {
             // Invalid token (parse failed) — ignore
-            log.debug("Blacklist skip: invalid token: {}", e.getMessage());
+            log.debug("Blacklist skip: invalid token", e);
         } catch (DataAccessException dae) {
             // Redis issue — fail open (don't break request flow)
-            log.warn("Redis unavailable while blacklisting token: {}", dae.getMessage());
+            log.warn("Redis unavailable while blacklisting token", dae);
         } catch (Exception ex) {
-            log.warn("Unexpected error while blacklisting token: {}", ex.getMessage());
+            log.warn("Unexpected error while blacklisting token", ex);
         }
     }
 
-    /**
-     * Check if a token (by JTI or hash fallback) is blacklisted.
-     * Returns false on Redis errors to avoid blocking valid traffic.
-     */
+    /** Overload: blacklist by jti/exp/iss (use when you minted the token and have claims). */
+    public void addToBlacklist(@NonNull String jti, Date exp, String iss) {
+        try {
+            if (exp == null) return;
+            long ttlMs = (exp.getTime() - System.currentTimeMillis()) - SKEW_MS;
+            if (ttlMs <= 0) return;
+            if (ttlMs < MIN_TTL_MS) ttlMs = MIN_TTL_MS;
+
+            String key = KEY_PREFIX + (iss != null ? "iss:" + sha256Url(iss) + ":" : "") + "jti:" + jti;
+            redis.opsForValue().set(key, "1", ttlMs, TimeUnit.MILLISECONDS);
+        } catch (DataAccessException dae) {
+            log.warn("Redis unavailable while blacklisting token (jti overload)", dae);
+        } catch (Exception ex) {
+            log.warn("Unexpected error while blacklisting token (jti overload)", ex);
+        }
+    }
+
+    /** Check if a token (by JTI or hash fallback) is blacklisted. Fail-open on Redis errors. */
     public boolean isBlacklisted(@NonNull String token) {
         try {
             if (token.isBlank()) return false;
 
-            // Try JTI first
             Optional<String> jtiOpt = safeOpt(() -> jwtService.extractClaim(token, Claims::getId));
-            return jtiOpt.map(s -> redisExists(KEY_PREFIX + "jti:" + s)).orElseGet(() -> redisExists(KEY_PREFIX + "sha:" + sha256Url(token)));
+            Optional<String> issOpt = safeOpt(() -> jwtService.extractClaim(token, Claims::getIssuer));
 
-            // Fallback: hash the token
+            String key = jtiOpt
+                    .map(jti -> KEY_PREFIX + issPrefix(issOpt.orElse(null)) + "jti:" + jti)
+                    .orElseGet(() -> KEY_PREFIX + issPrefix(issOpt.orElse(null)) + "sha:" + sha256Url(token));
 
+            return redisExists(key);
         } catch (IllegalArgumentException e) {
             // Invalid token (parse failed) — treat as not blacklisted
-            log.debug("Blacklist check: invalid token: {}", e.getMessage());
+            log.debug("Blacklist check: invalid token", e);
             return false;
         } catch (DataAccessException dae) {
-            log.warn("Redis unavailable during blacklist check: {}", dae.getMessage());
-            return false; // fail-open; JWT validation still protects you
+            log.warn("Redis unavailable during blacklist check", dae);
+            return false; // fail-open; signature/exp validation still applies
         } catch (Exception ex) {
-            log.warn("Unexpected error during blacklist check: {}", ex.getMessage());
+            log.warn("Unexpected error during blacklist check", ex);
             return false;
         }
     }
 
-    /** Safe wrapper that avoids nullable Boolean unboxing warnings. */
-    private boolean redisExists(String key) {
-        return redis.hasKey(key);
+    /** Optional: per-subject revocation fence for "logout all sessions". */
+    public void setRevocationFence(@NonNull String issuer, @NonNull String subject, long revokedAfterEpochSeconds, long ttlSeconds) {
+        try {
+            String key = KEY_PREFIX + "iss:" + sha256Url(issuer) + ":sub:" + sha256Url(subject) + ":revoked-after";
+            redis.opsForValue().set(key, Long.toString(revokedAfterEpochSeconds), ttlSeconds, TimeUnit.SECONDS);
+        } catch (DataAccessException dae) {
+            log.warn("Redis unavailable while setting revocation fence", dae);
+        } catch (Exception ex) {
+            log.warn("Unexpected error while setting revocation fence", ex);
+        }
+    }
+
+    /** Check helper to compare token iat against fence (call from your auth filter). */
+    public boolean isBeforeFence(String issuer, String subject, long iatEpochSeconds) {
+        try {
+            String key = KEY_PREFIX + "iss:" + sha256Url(issuer) + ":sub:" + sha256Url(subject) + ":revoked-after";
+            String v = redis.opsForValue().get(key);
+            if (v == null) return false;
+            long fence = Long.parseLong(v);
+            return iatEpochSeconds <= fence;
+        } catch (Exception e) {
+            // On errors, fail-open to avoid auth outages; your JWT checks still run
+            log.warn("Error reading revocation fence", e);
+            return false;
+        }
     }
 
     // ---------- helpers ----------
+
+    private String buildKey(String jti, String iss, String token) {
+        String prefix = KEY_PREFIX + issPrefix(iss);
+        if (jti != null) return prefix + "jti:" + jti;
+        return prefix + "sha:" + sha256Url(token);
+    }
+
+    private String issPrefix(String iss) {
+        return (iss != null ? "iss:" + sha256Url(iss) + ":" : "");
+    }
+
+    private boolean redisExists(String key) {
+        return redis.hasKey(key);
+    }
 
     private String safe(String s) {
         return (s == null || s.isBlank()) ? null : s;
@@ -105,15 +156,13 @@ public class TokenBlacklistConfig {
         }
     }
 
-    private String sha256Url(String token) {
+    private String sha256Url(String data) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] dig = md.digest(token.getBytes(StandardCharsets.UTF_8));
-            // URL-safe Base64 (no padding) to keep keys compact
+            byte[] dig = md.digest(data.getBytes(StandardCharsets.UTF_8));
             return Base64.getUrlEncoder().withoutPadding().encodeToString(dig);
         } catch (Exception e) {
-            // Should not happen; fallback to hex of the token bytes
-            return bytesToHex(token.getBytes(StandardCharsets.UTF_8));
+            return bytesToHex(data.getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -124,7 +173,5 @@ public class TokenBlacklistConfig {
     }
 
     @FunctionalInterface
-    private interface UnsafeSupplier<T> {
-        T get() throws Exception;
-    }
+    private interface UnsafeSupplier<T> { T get() throws Exception; }
 }

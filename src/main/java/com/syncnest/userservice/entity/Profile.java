@@ -17,7 +17,7 @@ import java.time.LocalDateTime;
 public class Profile extends BaseEntity{
 
     @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "id", nullable = false, unique = true)
+    @JoinColumn(name="user_id", unique = true)
     @ToString.Exclude
     @EqualsAndHashCode.Exclude
     private User user;

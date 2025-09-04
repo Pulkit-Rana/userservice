@@ -1,9 +1,7 @@
 package com.syncnest.userservice.bootstrap;
 
-import com.syncnest.userservice.entity.AuthProvider;
-import com.syncnest.userservice.entity.Profile;
-import com.syncnest.userservice.entity.User;
-import com.syncnest.userservice.entity.UserRole;
+import com.syncnest.userservice.entity.*;
+import com.syncnest.userservice.repository.DeviceMetadataRepository;
 import com.syncnest.userservice.repository.UserRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -14,6 +12,8 @@ import org.springframework.core.annotation.Order;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDateTime;
+
 @Slf4j
 @Component
 @Order(1)
@@ -21,6 +21,7 @@ import org.springframework.stereotype.Component;
 public class UserInitializer implements CommandLineRunner {
 
     private final UserRepository userRepository;
+    private final DeviceMetadataRepository deviceMetadataRepository;
     private final PasswordEncoder passwordEncoder;
 
     @Value("${app.init.admin.password}")
@@ -32,8 +33,8 @@ public class UserInitializer implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) {
-        // Add Admin user
-        createUserIfNotExists(
+        // Admin
+        User admin = createUserIfNotExists(
                 "admin@example.com",
                 ensureEncoded(adminPlainPassword),
                 UserRole.ROLE_ADMIN,
@@ -41,9 +42,10 @@ public class UserInitializer implements CommandLineRunner {
                 "Super",
                 "Admin"
         );
+        createTwoDevicesIfMissing(admin);
 
-        // Add Normal user
-        createUserIfNotExists(
+        // Normal user
+        User normal = createUserIfNotExists(
                 "user@example.com",
                 ensureEncoded(userPlainPassword),
                 UserRole.ROLE_USER,
@@ -51,9 +53,64 @@ public class UserInitializer implements CommandLineRunner {
                 "Test",
                 "User"
         );
+        createTwoDevicesIfMissing(normal);
     }
 
-    private void createUserIfNotExists(
+    private void createTwoDevicesIfMissing(User user) {
+        if (user == null) return;
+
+        // Device #1
+        upsertSimpleDevice(
+                user,
+                "New York, US",
+                AuthProvider.LOCAL,
+                DeviceType.DESKTOP,
+                LocalDateTime.now().minusDays(1)
+        );
+
+        // Device #2
+        upsertSimpleDevice(
+                user,
+                "San Francisco, US",
+                AuthProvider.LOCAL,
+                DeviceType.MOBILE,
+                LocalDateTime.now().minusHours(12)
+        );
+    }
+
+    /**
+     * Idempotent insert using (user, deviceType, location) as a natural key for bootstrap.
+     */
+    private void upsertSimpleDevice(
+            User user,
+            String location,
+            AuthProvider provider,
+            DeviceType deviceType,
+            LocalDateTime lastLoginAt
+    ) {
+        boolean exists = deviceMetadataRepository
+                .existsByUserAndDeviceTypeAndLocation(user, deviceType, location);
+
+        if (exists) {
+            log.info("DeviceMetadata already present for user={} type={} location={}",
+                    user.getEmail(), deviceType, location);
+            return;
+        }
+
+        DeviceMetadata dm = DeviceMetadata.builder()
+                .user(user)
+                .location(location)
+                .provider(provider)
+                .deviceType(deviceType)
+                .lastLoginAt(lastLoginAt)
+                .build();
+
+        deviceMetadataRepository.save(dm);
+        log.info("Created DeviceMetadata for user={} type={} location={}",
+                user.getEmail(), deviceType, location);
+    }
+
+    private User createUserIfNotExists(
             String email,
             String password,
             UserRole role,
@@ -61,35 +118,28 @@ public class UserInitializer implements CommandLineRunner {
             String firstName,
             String lastName
     ) {
-        if (userRepository.existsByEmail(email)) {
-            log.info("{} '{}' already exists. Skipping creation.", displayName, email);
-            return;
-        }
+        return userRepository.findByEmail(email).orElseGet(() -> {
+            User user = User.builder()
+                    .email(email)
+                    .password(password)
+                    .role(role)
+                    .enabled(true)
+                    .isLocked(false)
+                    .isVerified(true)
+                    // .provider(AuthProvider.LOCAL)
+                    .build();
 
-        // Build User
-        User user = User.builder()
-                .email(email)
-                .password(password)
-                .role(role)
-                .enabled(true)
-                .isLocked(false)
-                .isVerified(true)
-                .provider(AuthProvider.LOCAL)
-                .build();
+            Profile profile = Profile.builder()
+                    .user(user)
+                    .firstName(firstName)
+                    .lastName(lastName)
+                    .build();
 
-        // Build Profile linked to User
-        Profile profile = Profile.builder()
-                .user(user)
-                .firstName(firstName)
-                .lastName(lastName)
-                .build();
-
-        // Link both sides (bidirectional mapping)
-        user.setProfile(profile);
-
-        userRepository.save(user);
-
-        log.info("{} '{}' with profile added successfully.", displayName, email);
+            user.setProfile(profile);
+            User saved = userRepository.save(user);
+            log.info("{} '{}' with profile added successfully.", displayName, email);
+            return saved;
+        });
     }
 
     private String ensureEncoded(String rawOrEncoded) {

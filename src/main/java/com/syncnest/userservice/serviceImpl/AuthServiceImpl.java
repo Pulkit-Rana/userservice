@@ -15,6 +15,7 @@ import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -38,7 +39,7 @@ public class AuthServiceImpl implements AuthService {
         final String email = safeEmail(request.getEmail());
         final String password = Objects.requireNonNull(request.getPassword(), "password is required");
         final String deviceId = normalizeDeviceId(
-                firstNonBlank(request.getDeviceId(), request.getClientId(), "unknown")
+                firstNonBlank(request.getDeviceId(), request.getClientId())
         );
 
         // 1) Authenticate (will throw on bad credentials)
@@ -71,7 +72,7 @@ public class AuthServiceImpl implements AuthService {
         LoginResponse resp = new LoginResponse();
         resp.setAccessToken(accessToken);
         resp.setExpiresIn(expiresIn);
-        resp.setRefreshToken(rt.getRefreshToken()); // Controller should move to HttpOnly cookie and null this field.
+        resp.setRefreshToken(rt.getRefreshToken());
         resp.setDeviceId(deviceId);
         resp.setIssuedAt(Instant.now());
 
@@ -97,15 +98,15 @@ public class AuthServiceImpl implements AuthService {
         return d.length() > 64 ? d.substring(0, 64) : d;
     }
 
-    private String firstNonBlank(String a, String b, String fallback) {
+    private String firstNonBlank(String a, String b) {
         if (a != null && !a.isBlank()) return a;
         if (b != null && !b.isBlank()) return b;
-        return fallback;
+        return "unknown";
     }
 
     private Set<String> toRoleSet(User user) {
         return user.getAuthorities().stream()
-                .map(granted -> granted.getAuthority())
+                .map(GrantedAuthority::getAuthority)
                 .collect(Collectors.toSet());
     }
 

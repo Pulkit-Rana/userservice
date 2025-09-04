@@ -18,14 +18,16 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
- * Prod-grade refresh token service:
+ * Refresh token service (prod-grade):
  * - Stores only SHA-256 hash of refresh tokens.
  * - Rotation on each refresh; sliding inactivity window.
- * - Max N devices per user (per distinct deviceId).
+ * - Max N concurrent sessions per user (newest session kept, oldest revoked).
  * - Absolute lifetime cap as per refresh-token.expiration.milliseconds.
+ * NOTE on "devices":
+ * If you don't send a deviceId, we auto-generate a per-session identifier (for observability only).
+ * Enforcement is by session count, not by device.
  */
 @Service
 @RequiredArgsConstructor
@@ -42,7 +44,7 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
     @Value("${refresh-token.expiration.milliseconds:2592000000}")
     private long absoluteLifetimeMs;
 
-    /** Max concurrent devices per user. */
+    /** Max concurrent sessions per user. */
     @Value("${refresh-token.max.count:3}")
     private int maxDevices;
 
@@ -66,13 +68,8 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
     @Override
     @Transactional
     public RefreshTokenResponse issue(User user, String deviceId) {
-        final String dev = normalizeDevice(deviceId);
-
-        // Single token per device: revoke old active tokens on same device
-        revokeAllForUserDevice(user, dev);
-
-        // Enforce max devices across distinct deviceIds (keep newest devices)
-        enforceMaxDevices(user, maxDevices);
+        // If deviceId is not provided, we create a unique session id (not used for enforcement).
+        final String sessionId = resolveSessionId(deviceId);
 
         // Create raw + hash, set expiry (sliding + absolute cap)
         String raw = generateRawToken();
@@ -85,25 +82,29 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
         RefreshToken model = RefreshToken.builder()
                 .user(user)
                 .tokenHash(hash)
-                .deviceId(dev)
+                .deviceId(sessionId) // informational only if you aren't supplying deviceId
                 .issuedAt(now)
                 .expiresAt(finalExpiry)
                 .revoked(false)
                 .build();
 
+        // Save first so this session is "newest"
         refreshTokenRepo.save(model);
 
+        // Enforce max concurrent sessions AFTER saving => newest-in, oldest-out (FIFO)
+        enforceMaxSessions(user, maxDevices);
+
         RefreshTokenResponse resp = new RefreshTokenResponse();
-        resp.setRefreshToken(raw);          // return RAW to client
+        resp.setRefreshToken(raw);          // return RAW to client (only hash is stored)
         resp.setExpiresAt(model.getExpiresAt());
-        resp.setDeviceId(dev);
+        resp.setDeviceId(sessionId);
         return resp;
     }
 
     @Override
     @Transactional
     public RefreshTokenResponse validateAndRotate(RefreshTokenRequest request) {
-        String raw = require(request.getRefreshToken(), "refreshToken");
+        String raw = require(request.getRefreshToken());
         String deviceId = request.getDeviceId();
         String hash = sha256Hex(raw);
         Instant now = Instant.now();
@@ -112,7 +113,7 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
                 .findByTokenHashAndRevokedFalseAndExpiresAtAfter(hash, now)
                 .orElseThrow(() -> new IllegalArgumentException("Invalid or expired refresh token"));
 
-        // Optional device binding (recommended ON)
+        // Optional device binding (checked only if caller sends a deviceId)
         if (deviceId != null && !deviceId.isBlank() && !found.getDeviceId().equals(deviceId)) {
             throw new IllegalArgumentException("Device mismatch for refresh token");
         }
@@ -120,7 +121,8 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
         // Revoke old (rotation)
         found.setRevoked(true);
 
-        // Re-issue for same user & device (this slides inactivity window)
+        // Re-issue for same user & same session id (slides inactivity window)
+        // This will also enforce max sessions (newest-in, oldest-out).
         return issue(found.getUser(), found.getDeviceId());
     }
 
@@ -135,54 +137,40 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
     @Override
     @Transactional
     public void revokeAllForUserDevice(User user, String deviceId) {
+        // Keeps API compatibility if you later decide to bind to a real deviceId.
         Instant now = Instant.now();
         refreshTokenRepo.findAllByUserAndDeviceIdAndRevokedFalseAndExpiresAtAfter(user, normalizeDevice(deviceId), now)
                 .forEach(t -> t.setRevoked(true));
     }
 
     @Override
+    @Transactional
     public void purgeExpiredAndRevoked() {
-
+        purgeExpiredAndRevoked(Instant.now());
     }
 
     @Transactional
     @Override
     public void purgeExpiredAndRevoked(Instant now) {
-        refreshTokenRepo.deleteAllByExpiresAtBeforeOrRevokedTrue(Instant.now());
+        refreshTokenRepo.deleteAllByExpiresAtBeforeOrRevokedTrue(now);
     }
 
     // =========================== INTERNALS ===========================
 
-    private void enforceMaxDevices(User user, int max) {
+    /**
+     * Enforce max concurrent sessions by count (not by device).
+     * Keeps the newest 'max' sessions (by issuedAt DESC), revokes the rest.
+     */
+    private void enforceMaxSessions(User user, int max) {
         Instant now = Instant.now();
-        var active = refreshTokenRepo.findAllByUserAndRevokedFalseAndExpiresAtAfter(user, now);
+        List<RefreshToken> active = refreshTokenRepo.findAllByUserAndRevokedFalseAndExpiresAtAfter(user, now);
 
-        // Only the latest token per device should remain
-        Map<String, RefreshToken> latestPerDevice = active.stream()
-                .collect(Collectors.toMap(
-                        RefreshToken::getDeviceId,
-                        t -> t,
-                        (a, b) -> a.getIssuedAt().isAfter(b.getIssuedAt()) ? a : b
-                ));
+        if (active.size() <= max) return;
 
-        if (latestPerDevice.size() > max) {
-            // Keep N newest devices
-            Set<String> keep = latestPerDevice.values().stream()
-                    .sorted(Comparator.comparing(RefreshToken::getIssuedAt).reversed())
-                    .limit(max)
-                    .map(RefreshToken::getDeviceId)
-                    .collect(Collectors.toSet());
-
-            // Revoke tokens for devices outside keep-set
-            active.forEach(t -> { if (!keep.contains(t.getDeviceId())) t.setRevoked(true); });
-        }
-
-        // Collapse duplicates within each kept device (keep newest)
-        for (RefreshToken t : active) {
-            RefreshToken latest = latestPerDevice.get(t.getDeviceId());
-            if (latest != null && !Objects.equals(t.getId(), latest.getId())) {
-                t.setRevoked(true);
-            }
+        // Sort newest first, keep first 'max'
+        active.sort(Comparator.comparing(RefreshToken::getIssuedAt).reversed());
+        for (int i = max; i < active.size(); i++) {
+            active.get(i).setRevoked(true); // oldest first beyond the cap
         }
     }
 
@@ -204,14 +192,28 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
         }
     }
 
+    /**
+     * Returns a usable device/session id for storage (≤64 chars).
+     * - If a non-blank deviceId is provided, normalize & return it.
+     * - Otherwise, generate a stable random session id (for observability).
+     */
+    private String resolveSessionId(String deviceId) {
+        if (deviceId != null && !deviceId.isBlank()) return normalizeDevice(deviceId);
+        // 16 random bytes → base64url (~22 chars)
+        byte[] buf = new byte[16];
+        random.nextBytes(buf);
+        String sid = "sess-" + Base64.getUrlEncoder().withoutPadding().encodeToString(buf);
+        return sid.length() > 64 ? sid.substring(0, 64) : sid;
+    }
+
     private String normalizeDevice(String deviceId) {
-        if (deviceId == null || deviceId.isBlank()) return "unknown";
-        String d = deviceId.trim();
+        String d = (deviceId == null) ? "" : deviceId.trim();
+        if (d.isEmpty()) return "unknown";
         return d.length() > 64 ? d.substring(0, 64) : d;
     }
 
-    private static String require(String v, String name) {
-        if (v == null || v.isBlank()) throw new IllegalArgumentException(name + " is required");
+    private static String require(String v) {
+        if (v == null || v.isBlank()) throw new IllegalArgumentException("refreshToken is required");
         return v;
     }
 }

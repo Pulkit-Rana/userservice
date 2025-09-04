@@ -30,7 +30,7 @@ public class PasswordMatchValidator implements ConstraintValidator<PasswordMatch
 
             return password != null && password.equals(passwordMatch);
         } catch (NoSuchFieldException | IllegalAccessException e) {
-            e.printStackTrace();
+            e.getLocalizedMessage();
             return false;
         }
     }

@@ -24,11 +24,11 @@ public class DeviceMetadata {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
+
     private String location;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "provider", nullable = false, length = 20)
-
     private AuthProvider provider = AuthProvider.LOCAL;
 
     @Enumerated(EnumType.STRING)

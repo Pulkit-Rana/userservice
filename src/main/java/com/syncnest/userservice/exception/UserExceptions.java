@@ -25,11 +25,11 @@ public final class UserExceptions {
 
     /** 409 Conflict – Email/username already in use or uniqueness violated. */
     public static final class UserAlreadyExists extends ApiException {
-        public UserAlreadyExists(String detail) {
+        public UserAlreadyExists(String email) {
             super(HttpStatus.CONFLICT,
                     "https://syncnest.dev/problems/user-already-exists",
-                    "User Already Exists",
-                    detail);
+                    "User with email '" + email + "' already exists.",
+                    email);
         }
     }
 

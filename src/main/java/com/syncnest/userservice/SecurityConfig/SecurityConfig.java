@@ -56,6 +56,7 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll() // CORS preflight
                         .requestMatchers(
                                 "/auth/**",
+                                "/register",
                                 "/public/**",
                                 "/actuator/health",
                                 "/actuator/info"

@@ -54,5 +54,6 @@ public class RefreshToken {
 
     /** Revoked flag for server-side invalidation. */
     @Column(name = "revoked", nullable = false)
+    @Builder.Default
     private boolean revoked = false;
 }

@@ -2,11 +2,17 @@ package com.syncnest.userservice.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.syncnest.userservice.entity.AuthProvider;
+import com.syncnest.userservice.entity.DeviceType;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
 @Data
+@Getter
+@Setter
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class LoginRequest {
 
@@ -31,4 +37,11 @@ public class LoginRequest {
 
     @Size(max = 255, message = "userAgent must be <= 255 characters")
     private String userAgent;
+
+    // New fields for your recordDeviceLogin method
+    private AuthProvider provider = AuthProvider.LOCAL; // default
+    private DeviceType deviceType = DeviceType.UNKNOWN; // default
+
+    @Size(max = 255, message = "location must be <= 255 characters")
+    private String location;
 }

@@ -5,9 +5,9 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.time.Instant;
-import java.util.Set;
 
 @Data
+@Builder
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class LoginResponse {
 
@@ -17,15 +17,4 @@ public class LoginResponse {
     private String deviceId;
     private Instant issuedAt;
     private UserSummary user;
-
-
-@Data
-@JsonInclude(JsonInclude.Include.NON_NULL)
-public static class UserSummary {
-    private String id;
-    private String email;
-    private String displayName;
-    private Set<String> roles;
-    private boolean emailVerified;
-    }
 }

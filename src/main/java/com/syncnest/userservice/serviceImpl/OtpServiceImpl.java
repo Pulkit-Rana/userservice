@@ -1,14 +1,20 @@
 package com.syncnest.userservice.serviceImpl;
 
-import com.syncnest.userservice.dto.LoginResponse;
-import com.syncnest.userservice.dto.OtpStatus;
-import com.syncnest.userservice.dto.VerifyOTPRequest;
+import com.syncnest.userservice.SecurityConfig.JwtTokenProviderConfig;
+import com.syncnest.userservice.dto.*;
+import com.syncnest.userservice.entity.AuthProvider;
+import com.syncnest.userservice.entity.DeviceType;
+import com.syncnest.userservice.entity.User;
+import com.syncnest.userservice.repository.UserRepository;
+import com.syncnest.userservice.service.AuthService;
 import com.syncnest.userservice.service.OtpService;
+import com.syncnest.userservice.service.RefreshTokenService;
 import com.syncnest.userservice.utils.EmailTemplate;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.security.core.token.Sha512DigestUtils;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.Duration;
@@ -22,6 +28,8 @@ public class OtpServiceImpl implements OtpService {
 
     private final RedisTemplate<String, String> redisTemplate;
     private final EmailTemplate emailService;
+    private final UserRepository userRepository;
+    private final AuthService  authService;
 
     // ==== Config ====
     private static final String OTP_PREFIX = "otp:signup:";
@@ -88,6 +96,7 @@ public class OtpServiceImpl implements OtpService {
      * @return
      */
     @Override
+    @Transactional
     public LoginResponse verifyAndConsumeOtpOrThrow(VerifyOTPRequest verifyOTP) {
         final String email = norm(verifyOTP.getEmail());
 
@@ -97,22 +106,45 @@ public class OtpServiceImpl implements OtpService {
         }
 
         String hashedEnteredOtp = Sha512DigestUtils.shaHex(verifyOTP.getOtp());
-
         if (!hashedEnteredOtp.equals(storedHash)) {
             int attempts = incrementAttempts(email);
             if (attempts >= MAX_VERIFY_ATTEMPTS) {
-                // burn the OTP and start cooldown to throttle brute force
                 deleteOtpKeys(email);
                 startCooldown(email);
-                throw new IllegalArgumentException("Too many incorrect attempts. Please request a new OTP after 5 minutes.");
+                throw new IllegalArgumentException(
+                        "Too many incorrect attempts. Please request a new OTP after 5 minutes."
+                );
             }
             throw new IllegalArgumentException("Incorrect OTP.");
         }
 
         // Success → consume OTP & counters
         deleteOtpKeys(email);
-        return null;
+
+        // 1) Resolve user (managed in this @Transactional method)
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new IllegalArgumentException("User not found"));
+
+        // 2) Enable/verify/unlock account here (persists on tx commit)
+        user.setVerified(true);
+        user.setEnabled(true);
+        user.setLocked(false);
+        // No explicit save() needed if 'user' is managed; call save if your setup requires.
+
+        // 3) Build minimal DeviceContext (nulls are OK; AuthServiceImpl will normalize)
+        DeviceContext ctx = DeviceContext.builder()
+                .deviceId(null)                 // not in request → will default to "unknown"
+                .clientId(null)
+                .location(null)
+                .provider(AuthProvider.LOCAL)
+                .deviceType(DeviceType.UNKNOWN)
+                .build();
+
+        // 4) Issue tokens + record device metadata
+        return authService.issueTokensFor(user, ctx, true);
     }
+
+
 
     // ==== Helpers ====
 

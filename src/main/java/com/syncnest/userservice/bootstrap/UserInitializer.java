@@ -63,7 +63,6 @@ public class UserInitializer implements CommandLineRunner {
         upsertSimpleDevice(
                 user,
                 "New York, US",
-                AuthProvider.LOCAL,
                 DeviceType.DESKTOP,
                 LocalDateTime.now().minusDays(1)
         );
@@ -72,7 +71,6 @@ public class UserInitializer implements CommandLineRunner {
         upsertSimpleDevice(
                 user,
                 "San Francisco, US",
-                AuthProvider.LOCAL,
                 DeviceType.MOBILE,
                 LocalDateTime.now().minusHours(12)
         );
@@ -84,7 +82,6 @@ public class UserInitializer implements CommandLineRunner {
     private void upsertSimpleDevice(
             User user,
             String location,
-            AuthProvider provider,
             DeviceType deviceType,
             LocalDateTime lastLoginAt
     ) {
@@ -100,7 +97,7 @@ public class UserInitializer implements CommandLineRunner {
         DeviceMetadata dm = DeviceMetadata.builder()
                 .user(user)
                 .location(location)
-                .provider(provider)
+                .provider(AuthProvider.LOCAL)
                 .deviceType(deviceType)
                 .lastLoginAt(lastLoginAt)
                 .build();

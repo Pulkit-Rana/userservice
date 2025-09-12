@@ -125,11 +125,6 @@ public class JwtTokenProviderConfig {
         return createToken(new HashMap<>(), email);
     }
 
-    /** Overload to support extra application claims when needed. */
-    public String generateToken(Map<String, Object> extraClaims, String email) {
-        return createToken(extraClaims != null ? new HashMap<>(extraClaims) : new HashMap<>(), email);
-    }
-
     /** Create the JWT token with custom claims, subject=email, and expiration. */
     private String createToken(Map<String, Object> claims, String email) {
         long now = System.currentTimeMillis();

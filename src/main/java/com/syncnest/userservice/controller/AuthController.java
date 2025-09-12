@@ -1,7 +1,6 @@
 package com.syncnest.userservice.controller;
 
 import com.syncnest.userservice.dto.*;
-import com.syncnest.userservice.entity.User;
 import com.syncnest.userservice.repository.UserRepository;
 import com.syncnest.userservice.service.AuthService;
 import com.syncnest.userservice.service.OtpService;
@@ -16,7 +15,6 @@ import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
@@ -118,32 +116,22 @@ public class AuthController {
     }
 
     @PostMapping("/verify-otp")
-    @Transactional
     public ResponseEntity<LoginResponse> verifyOtp(@RequestBody @Valid VerifyOTPRequest verifyOtp) {
-        // 1) Verify OTP and issue tokens (service returns a full LoginResponse)
         LoginResponse response = otpService.verifyAndConsumeOtpOrThrow(verifyOtp);
 
-        // 2) Mark account state; will be persisted by @Transactional
-        User user = userRepository.findByEmail(verifyOtp.getEmail())
-                .orElseThrow(() -> new IllegalArgumentException("User not found for email."));
-        user.setVerified(true);
-        user.setEnabled(true);
-        user.setLocked(false);
-
-        // 3) Move refresh token into HttpOnly cookie, strip from JSON body
         ResponseCookie rtCookie = ResponseCookie.from("refreshToken", response.getRefreshToken())
                 .httpOnly(true)
-                .secure(true)
-                .sameSite("Strict")
+                .secure(true)             // see notes below
+                .sameSite("Strict")       // see notes below
                 .path("/")
                 .maxAge(Duration.ofDays(30))
                 .build();
-        response.setRefreshToken(null); // do not leak in JSON
 
-        // 4) Return
+        response.setRefreshToken(null);   // keep it out of the JSON body
+
         return ResponseEntity.ok()
                 .header(HttpHeaders.SET_COOKIE, rtCookie.toString())
-                .header(HttpHeaders.LOCATION, NEXT_SECURED_PATH) // optional hint
+                .header(HttpHeaders.LOCATION, NEXT_SECURED_PATH)
                 .body(response);
     }
 

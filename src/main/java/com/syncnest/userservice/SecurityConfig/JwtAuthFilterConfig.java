@@ -13,6 +13,7 @@ import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -59,6 +60,7 @@ public class JwtAuthFilterConfig extends OncePerRequestFilter {
                 // Load user by email (your UserDetailsService must map username->email)
                 UserDetails userDetails = userDetailsService.loadUserByUsername(email);
 
+
                 // 5) Validate token (includes expiry & subject match)
                 if (jwtService.validateToken(token, userDetails)) {
                     SecurityContext securityContext = SecurityContextHolder.createEmptyContext();
@@ -69,10 +71,14 @@ public class JwtAuthFilterConfig extends OncePerRequestFilter {
                     SecurityContextHolder.setContext(securityContext);
                 }
             }
-        } catch (IllegalArgumentException ex) {
-            // Invalid token format/signature/claims → do not authenticate, just continue
-            log.debug("JWT validation failed: {}", ex.getMessage());
+        } catch (UsernameNotFoundException e) {
+            // User vanished or is unknown — proceed unauthenticated
+            log.debug("User not found for JWT subject");
+        } catch (io.jsonwebtoken.JwtException | IllegalArgumentException e) {
+            // Signature/format/expiry/etc. — proceed unauthenticated
+            log.debug("JWT invalid: {}", e.getMessage());
         }
+
 
         // 6) Continue filter chain
         filterChain.doFilter(request, response);

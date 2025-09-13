@@ -13,7 +13,6 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.annotation.web.configurers.HeadersConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
@@ -33,19 +32,16 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthFilterConfig jwtAuthFilter;
-    private final UserDetailsService userDetailsService;
     private final JwtAuthenticationEntryPoint authenticationEntryPoint; // 401
     private final JwtAccessDeniedHandler accessDeniedHandler;           // 403
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
-                // Core API hardening
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(Customizer.withDefaults())
                 .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
-                // Disable unused mechanisms (smaller surface, faster)
                 .httpBasic(AbstractHttpConfigurer::disable)
                 .formLogin(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
@@ -64,14 +60,10 @@ public class SecurityConfig {
                         .requestMatchers("/api/users/**").hasAnyRole("ADMIN", "USER")
                         .anyRequest().authenticated()
                 )
-
-                // 401/403 mapping
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint(authenticationEntryPoint)
                         .accessDeniedHandler(accessDeniedHandler)
                 )
-
-                // Security headers tuned for JSON APIs
                 .headers(h -> h
                         .frameOptions(HeadersConfigurer.FrameOptionsConfig::deny)
                         .referrerPolicy(r -> r.policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER))

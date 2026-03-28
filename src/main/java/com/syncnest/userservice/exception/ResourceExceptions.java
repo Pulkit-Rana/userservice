@@ -6,8 +6,11 @@ import org.springframework.http.HttpStatus;
  * Exceptions representing resource lifecycle/errors (not found, state conflicts,
  * optimistic locking/version mismatches, etc.).
  *
- * Conventions:
- *  - type:  https://syncnest.dev/problems/<slug>
+ * All exceptions include:
+ *  - Error code: Machine-readable code (SYSTEM_004, SYSTEM_010, etc.)
+ *  - Detailed reason: Specific description of the resource issue
+ *  - HTTP Status: Appropriate HTTP status code
+ *  - Type: RFC 7807 problem type URI
  */
 public final class ResourceExceptions {
 
@@ -19,7 +22,8 @@ public final class ResourceExceptions {
             super(HttpStatus.NOT_FOUND,
                     "https://syncnest.dev/problems/not-found",
                     "Resource Not Found",
-                    detail);
+                    ErrorCode.SYSTEM_004,
+                    detail != null ? detail : ErrorCode.SYSTEM_004.getMessage());
         }
     }
 
@@ -29,7 +33,8 @@ public final class ResourceExceptions {
             super(HttpStatus.CONFLICT,
                     "https://syncnest.dev/problems/conflict",
                     "Conflict",
-                    detail);
+                    ErrorCode.SYSTEM_010,
+                    detail != null ? detail : ErrorCode.SYSTEM_010.getMessage());
         }
     }
 
@@ -39,7 +44,8 @@ public final class ResourceExceptions {
             super(HttpStatus.GONE,
                     "https://syncnest.dev/problems/gone",
                     "Resource Gone",
-                    detail);
+                    ErrorCode.SYSTEM_004,
+                    detail != null ? detail : "The requested resource is no longer available");
         }
     }
 
@@ -49,7 +55,8 @@ public final class ResourceExceptions {
             super(HttpStatus.LOCKED,
                     "https://syncnest.dev/problems/locked",
                     "Resource Locked",
-                    detail);
+                    ErrorCode.SYSTEM_001,
+                    detail != null ? detail : "The requested resource is locked and cannot be modified");
         }
     }
 
@@ -59,7 +66,8 @@ public final class ResourceExceptions {
             super(HttpStatus.CONFLICT,
                     "https://syncnest.dev/problems/version-conflict",
                     "Version Conflict",
-                    detail);
+                    ErrorCode.SYSTEM_010,
+                    detail != null ? detail : "Resource version conflict. The resource may have been modified");
         }
     }
 
@@ -69,7 +77,19 @@ public final class ResourceExceptions {
             super(HttpStatus.PRECONDITION_FAILED,
                     "https://syncnest.dev/problems/precondition-required",
                     "Precondition Required",
-                    detail);
+                    ErrorCode.VALIDATION_010,
+                    detail != null ? detail : "Required preconditions are not met for this resource");
+        }
+    }
+
+    /** 409 Conflict – Duplicate resource already exists. */
+    public static final class DuplicateResource extends ApiException {
+        public DuplicateResource(String resourceType, String identifier) {
+            super(HttpStatus.CONFLICT,
+                    "https://syncnest.dev/problems/duplicate-resource",
+                    "Duplicate Resource",
+                    ErrorCode.SYSTEM_010,
+                    resourceType + " with identifier '" + identifier + "' already exists");
         }
     }
 }

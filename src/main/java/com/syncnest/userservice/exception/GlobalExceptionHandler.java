@@ -35,10 +35,19 @@ public class GlobalExceptionHandler {
     public void handleApiException(@NonNull HttpServletRequest req,
                                    @NonNull HttpServletResponse resp,
                                    @NonNull ApiException ex) throws IOException {
-        // Log minimal info; details remain generic to clients
-        log.debug("ApiException: status={}, type={}, title={}, detail={}",
-                ex.getStatus(), ex.getType(), ex.getTitle(), ex.getMessage());
-        writer.write(req, resp, ex.getStatus(), ex.getType(), ex.getTitle(), safeDetail(ex.getMessage()));
+        // Log with error code for better tracking
+        log.warn("ApiException: code={}, status={}, type={}, title={}",
+                ex.getErrorCode(), ex.getStatus(), ex.getType(), ex.getTitle());
+        
+        // Write response with error code and detailed reason
+        String responseBody = ErrorResponseFormatter.formatErrorResponse(
+                ex.getErrorCode(),
+                ex.getTitle(),
+                ex.getDetailReason(),
+                ex.getType(),
+                req.getRequestURI()
+        );
+        writer.writeJson(req, resp, ex.getStatus(), responseBody);
     }
 
     // ---------- Validation & request-shape errors ----------

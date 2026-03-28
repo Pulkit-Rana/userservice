@@ -8,9 +8,20 @@ import lombok.Value;
 @Value
 @Builder
 public class DeviceContext {
-    String deviceId;       // normalized per policy
-    String clientId;       // optional; used for fallback normalization
-    String location;       // optional
+    /** Client-supplied device identifier (from request body). */
+    String deviceId;
+    /** Optional client identifier used as deviceId fallback. */
+    String clientId;
+    /** Real client IP — always extracted server-side, never trusted from request body. */
+    String ip;
+    /** Raw User-Agent header from the HTTP request. */
+    String userAgent;
+    /** Operating system parsed from User-Agent. */
+    String os;
+    /** Browser name parsed from User-Agent. */
+    String browser;
+    /** Location resolved from IP (async, best-effort). */
+    String location;
     AuthProvider provider; // default LOCAL
     DeviceType deviceType; // default UNKNOWN
 }

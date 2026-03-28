@@ -6,10 +6,11 @@ import org.springframework.http.HttpStatus;
  * Exceptions representing problems with the incoming client request itself
  * (malformed input, invalid state, headers/media, etc.).
  *
- * Conventions:
- *  - type:  https://syncnest.dev/problems/<slug>
- *  - title: short, human-readable summary
- *  - detail: safe, non-sensitive explanation suitable for clients
+ * All exceptions include:
+ *  - Error code: Machine-readable code (VALIDATION_*, SYSTEM_*, etc.)
+ *  - Detailed reason: Specific description of what went wrong
+ *  - HTTP Status: Appropriate HTTP status code
+ *  - Type: RFC 7807 problem type URI
  */
 public final class RequestExceptions {
 
@@ -21,7 +22,8 @@ public final class RequestExceptions {
             super(HttpStatus.BAD_REQUEST,
                     "https://syncnest.dev/problems/bad-request",
                     "Bad Request",
-                    detail);
+                    ErrorCode.SYSTEM_007,
+                    detail != null ? detail : ErrorCode.SYSTEM_007.getMessage());
         }
     }
 
@@ -31,7 +33,8 @@ public final class RequestExceptions {
             super(HttpStatus.BAD_REQUEST,
                     "https://syncnest.dev/problems/invalid-parameter",
                     "Invalid Parameter",
-                    detail);
+                    ErrorCode.VALIDATION_002,
+                    detail != null ? detail : ErrorCode.VALIDATION_002.getMessage());
         }
     }
 
@@ -41,7 +44,8 @@ public final class RequestExceptions {
             super(HttpStatus.BAD_REQUEST,
                     "https://syncnest.dev/problems/invalid-header",
                     "Invalid Header",
-                    detail);
+                    ErrorCode.VALIDATION_002,
+                    detail != null ? detail : "Required header is missing or invalid");
         }
     }
 
@@ -51,7 +55,8 @@ public final class RequestExceptions {
             super(HttpStatus.PAYLOAD_TOO_LARGE,
                     "https://syncnest.dev/problems/payload-too-large",
                     "Payload Too Large",
-                    detail);
+                    ErrorCode.SYSTEM_008,
+                    detail != null ? detail : "Request body exceeds maximum allowed size");
         }
     }
 
@@ -61,7 +66,8 @@ public final class RequestExceptions {
             super(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
                     "https://syncnest.dev/problems/unsupported-media-type",
                     "Unsupported Media Type",
-                    detail);
+                    ErrorCode.SYSTEM_006,
+                    detail != null ? detail : ErrorCode.SYSTEM_006.getMessage());
         }
     }
 
@@ -71,7 +77,8 @@ public final class RequestExceptions {
             super(HttpStatus.METHOD_NOT_ALLOWED,
                     "https://syncnest.dev/problems/method-not-allowed",
                     "Method Not Allowed",
-                    detail);
+                    ErrorCode.SYSTEM_005,
+                    detail != null ? detail : ErrorCode.SYSTEM_005.getMessage());
         }
     }
 
@@ -84,7 +91,8 @@ public final class RequestExceptions {
             super(HttpStatus.UNPROCESSABLE_ENTITY,
                     "https://syncnest.dev/problems/validation-failed",
                     "Validation Failed",
-                    detail);
+                    ErrorCode.VALIDATION_001,
+                    detail != null ? detail : ErrorCode.VALIDATION_001.getMessage());
         }
     }
 
@@ -94,7 +102,8 @@ public final class RequestExceptions {
             super(HttpStatus.TOO_MANY_REQUESTS,
                     "https://syncnest.dev/problems/rate-limited",
                     "Too Many Requests",
-                    detail);
+                    ErrorCode.SYSTEM_008,
+                    detail != null ? detail : "Rate limit exceeded. Please try again later");
         }
     }
 
@@ -104,7 +113,41 @@ public final class RequestExceptions {
             super(HttpStatus.PRECONDITION_FAILED,
                     "https://syncnest.dev/problems/precondition-failed",
                     "Precondition Failed",
-                    detail);
+                    ErrorCode.VALIDATION_010,
+                    detail != null ? detail : "Request preconditions are not met");
+        }
+    }
+
+    /** 400 Bad Request – Missing required field in request. */
+    public static final class MissingRequiredField extends ApiException {
+        public MissingRequiredField(String fieldName) {
+            super(HttpStatus.BAD_REQUEST,
+                    "https://syncnest.dev/problems/missing-required-field",
+                    "Missing Required Field",
+                    ErrorCode.VALIDATION_003,
+                    "Required field '" + fieldName + "' is missing");
+        }
+    }
+
+    /** 400 Bad Request – Field length validation failed. */
+    public static final class FieldLengthExceeded extends ApiException {
+        public FieldLengthExceeded(String fieldName, int maxLength) {
+            super(HttpStatus.BAD_REQUEST,
+                    "https://syncnest.dev/problems/field-length-exceeded",
+                    "Field Length Exceeded",
+                    ErrorCode.VALIDATION_005,
+                    "Field '" + fieldName + "' exceeds maximum length of " + maxLength + " characters");
+        }
+    }
+
+    /** 400 Bad Request – Invalid enum value. */
+    public static final class InvalidEnumValue extends ApiException {
+        public InvalidEnumValue(String fieldName, String value) {
+            super(HttpStatus.BAD_REQUEST,
+                    "https://syncnest.dev/problems/invalid-enum-value",
+                    "Invalid Enum Value",
+                    ErrorCode.VALIDATION_006,
+                    "Field '" + fieldName + "' has invalid value: '" + value + "'");
         }
     }
 }

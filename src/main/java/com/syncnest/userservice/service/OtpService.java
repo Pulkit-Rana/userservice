@@ -1,5 +1,6 @@
 package com.syncnest.userservice.service;
 
+import com.syncnest.userservice.dto.DeviceContext;
 import com.syncnest.userservice.dto.LoginResponse;
 import com.syncnest.userservice.dto.OtpStatus;
 import com.syncnest.userservice.dto.VerifyOTPRequest;
@@ -21,7 +22,7 @@ public interface OtpService {
      * @return
      * @throws IllegalArgumentException if OTP is invalid, expired, or too many attempts
      */
-    LoginResponse verifyAndConsumeOtpOrThrow(VerifyOTPRequest verifyOTP);
+    LoginResponse verifyAndConsumeOtpOrThrow(VerifyOTPRequest verifyOTP, DeviceContext deviceContext);
 
     /**
      * Returns the current OTP status for the given email, including cooldown flag,

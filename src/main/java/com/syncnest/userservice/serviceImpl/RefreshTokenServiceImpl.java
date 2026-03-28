@@ -2,9 +2,12 @@ package com.syncnest.userservice.serviceImpl;
 
 import com.syncnest.userservice.dto.RefreshTokenRequest;
 import com.syncnest.userservice.dto.RefreshTokenResponse;
+import com.syncnest.userservice.entity.AuditEventType;
+import com.syncnest.userservice.entity.AuditOutcome;
 import com.syncnest.userservice.entity.RefreshToken;
 import com.syncnest.userservice.entity.User;
 import com.syncnest.userservice.repository.RefreshTokenRepository;
+import com.syncnest.userservice.service.AuditHistoryService;
 import com.syncnest.userservice.service.RefreshTokenService;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -35,6 +38,7 @@ import java.util.*;
 public class RefreshTokenServiceImpl implements RefreshTokenService {
 
     private final RefreshTokenRepository refreshTokenRepo;
+    private final AuditHistoryService auditHistoryService;
 
     /** Sliding inactivity window seconds. Default 7 days if not configured. */
     @Value("${refresh-token.inactivity.seconds:604800}")
@@ -61,15 +65,19 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
         if (randomBytes < 32) randomBytes = 32; // >= 256-bit
         if (inactivitySeconds < 60) inactivitySeconds = 60; // sane floor
         if (absoluteLifetimeMs < 60000) absoluteLifetimeMs = 60000;
+        log.info("RefreshTokenService initialized: maxDevices={}, inactivitySeconds={}, absoluteLifetimeMs={}, randomBytes={}",
+                maxDevices, inactivitySeconds, absoluteLifetimeMs, randomBytes);
     }
 
-    // ============================== API ==============================
+    // ...existing code...
 
     @Override
     @Transactional
     public RefreshTokenResponse issue(User user, String deviceId) {
         // If deviceId is not provided, we create a unique session id (not used for enforcement).
         final String sessionId = resolveSessionId(deviceId);
+
+        log.debug("Issuing refresh token for user={}, sessionId={}", user.getEmail(), sessionId);
 
         // Create raw + hash, set expiry (sliding + absolute cap)
         String raw = generateRawToken();
@@ -90,6 +98,8 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
 
         // Save first so this session is "newest"
         refreshTokenRepo.save(model);
+        log.debug("Refresh token saved: tokenId={}, user={}, expiresAt={}", 
+                model.getId(), user.getEmail(), finalExpiry);
 
         // Enforce max concurrent sessions AFTER saving => newest-in, oldest-out (FIFO)
         enforceMaxSessions(user, maxDevices);
@@ -98,6 +108,9 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
         resp.setRefreshToken(raw);          // return RAW to client (only hash is stored)
         resp.setExpiresAt(model.getExpiresAt());
         resp.setDeviceId(sessionId);
+        
+        log.info("Refresh token issued for user={}, sessionId={}, expiresAt={}", 
+                user.getEmail(), sessionId, finalExpiry);
         return resp;
     }
 
@@ -109,38 +122,137 @@ public class RefreshTokenServiceImpl implements RefreshTokenService {
         String hash = sha256Hex(raw);
         Instant now = Instant.now();
 
+        log.debug("Validating refresh token for deviceId: {}", deviceId);
+
         RefreshToken found = refreshTokenRepo
                 .findByTokenHashAndRevokedFalseAndExpiresAtAfter(hash, now)
-                .orElseThrow(() -> new IllegalArgumentException("Invalid or expired refresh token"));
+                .orElseThrow(() -> {
+                    log.warn("Refresh token validation failed: token invalid or expired");
+                    auditHistoryService.record(
+                            AuditEventType.REFRESH_TOKEN,
+                            AuditOutcome.FAILURE,
+                            null,
+                            null,
+                            deviceId,
+                            null,
+                            null,
+                            null,
+                            "REFRESH_TOKEN_INVALID_OR_EXPIRED"
+                    );
+                    return new IllegalArgumentException("Invalid or expired refresh token");
+                });
+
+        log.debug("Refresh token found for user={}, sessionId={}, expiresAt={}", 
+                found.getUser().getEmail(), found.getDeviceId(), found.getExpiresAt());
+
+        if (found.getUser().isDeleted() || !found.getUser().isEnabled() || found.getUser().isLocked()) {
+            found.setRevoked(true);
+            auditHistoryService.record(
+                    AuditEventType.REFRESH_TOKEN,
+                    AuditOutcome.FAILURE,
+                    found.getUser(),
+                    found.getUser().getEmail(),
+                    found.getDeviceId(),
+                    null,
+                    null,
+                    null,
+                    found.getUser().isDeleted() ? "REFRESH_TOKEN_USER_DELETED" : "REFRESH_TOKEN_USER_DISABLED"
+            );
+            throw new IllegalArgumentException("Account is no longer active");
+        }
 
         // Optional device binding (checked only if caller sends a deviceId)
         if (deviceId != null && !deviceId.isBlank() && !found.getDeviceId().equals(deviceId)) {
+            log.warn("Refresh token device mismatch for user={}: expected={}, provided={}", 
+                    found.getUser().getEmail(), found.getDeviceId(), deviceId);
+            auditHistoryService.record(
+                    AuditEventType.REFRESH_TOKEN,
+                    AuditOutcome.FAILURE,
+                    found.getUser(),
+                    found.getUser().getEmail(),
+                    deviceId,
+                    null,
+                    null,
+                    null,
+                    "REFRESH_TOKEN_DEVICE_MISMATCH"
+            );
             throw new IllegalArgumentException("Device mismatch for refresh token");
         }
 
         // Revoke old (rotation)
         found.setRevoked(true);
+        log.debug("Refresh token revoked for user={}, sessionId={}", found.getUser().getEmail(), found.getDeviceId());
 
         // Re-issue for same user & same session id (slides inactivity window)
         // This will also enforce max sessions (newest-in, oldest-out).
-        return issue(found.getUser(), found.getDeviceId());
+        RefreshTokenResponse response = issue(found.getUser(), found.getDeviceId());
+        auditHistoryService.record(
+                AuditEventType.REFRESH_TOKEN,
+                AuditOutcome.SUCCESS,
+                found.getUser(),
+                found.getUser().getEmail(),
+                found.getDeviceId(),
+                null,
+                null,
+                null,
+                "REFRESH_TOKEN_ROTATED"
+        );
+        
+        log.info("Refresh token rotated successfully for user={}, newExpiresAt={}", 
+                found.getUser().getEmail(), response.getExpiresAt());
+        return response;
     }
 
     @Override
     @Transactional
     public void revokeAllForUser(User user) {
+        log.debug("Revoking all refresh tokens for user={}", user.getEmail());
+
         Instant now = Instant.now();
-        refreshTokenRepo.findAllByUserAndRevokedFalseAndExpiresAtAfter(user, now)
-                .forEach(t -> t.setRevoked(true));
+        List<RefreshToken> active = refreshTokenRepo.findAllByUserAndRevokedFalseAndExpiresAtAfter(user, now);
+        active.forEach(t -> t.setRevoked(true));
+        long revokedCount = active.size();
+
+        log.info("Revoked {} refresh tokens for user={}", revokedCount, user.getEmail());
+
+        auditHistoryService.record(
+                AuditEventType.LOGOUT,
+                AuditOutcome.SUCCESS,
+                user,
+                user.getEmail(),
+                null,
+                null,
+                null,
+                null,
+                "LOGOUT_ALL_DEVICES"
+        );
     }
 
     @Override
     @Transactional
     public void revokeAllForUserDevice(User user, String deviceId) {
+        log.debug("Revoking refresh tokens for user={}, deviceId={}", user.getEmail(), deviceId);
+        
         // Keeps API compatibility if you later decide to bind to a real deviceId.
         Instant now = Instant.now();
-        refreshTokenRepo.findAllByUserAndDeviceIdAndRevokedFalseAndExpiresAtAfter(user, normalizeDevice(deviceId), now)
-                .forEach(t -> t.setRevoked(true));
+        String normalizedDevice = normalizeDevice(deviceId);
+        List<RefreshToken> active = refreshTokenRepo.findAllByUserAndDeviceIdAndRevokedFalseAndExpiresAtAfter(user, normalizedDevice, now);
+        active.forEach(t -> t.setRevoked(true));
+        long revokedCount = active.size();
+
+        log.info("Revoked {} refresh tokens for user={}, deviceId={}", revokedCount, user.getEmail(), deviceId);
+
+        auditHistoryService.record(
+                AuditEventType.LOGOUT,
+                AuditOutcome.SUCCESS,
+                user,
+                user.getEmail(),
+                normalizedDevice,
+                null,
+                null,
+                null,
+                "LOGOUT_SINGLE_DEVICE"
+        );
     }
 
     @Override

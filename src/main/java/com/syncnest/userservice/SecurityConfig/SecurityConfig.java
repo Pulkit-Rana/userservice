@@ -52,12 +52,12 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll() // CORS preflight
                         .requestMatchers(
                                 "/auth/**",
-                                "/register",
+                                "/oauth/**",
                                 "/public/**",
                                 "/actuator/health",
                                 "/actuator/info"
                         ).permitAll()
-                        .requestMatchers("/api/users/**").hasAnyRole("ADMIN", "USER")
+                        .requestMatchers("/users/**").hasAnyRole("ADMIN", "USER")
                         .anyRequest().authenticated()
                 )
                 .exceptionHandling(ex -> ex

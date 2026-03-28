@@ -13,6 +13,7 @@ import org.springframework.security.core.userdetails.UserDetails;
 import java.io.Serial;
 import java.io.Serializable;
 import java.security.Principal;
+import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Set;
 
@@ -33,6 +34,15 @@ public class User extends BaseEntity implements UserDetails, Principal, Serializ
     @Email(message = "Email should be valid")
     @Column(unique = true, nullable = false, length = 50)
     private String email;
+
+    @Column(name = "google_sub", unique = true, length = 128)
+    private String googleSub;
+
+    @Column(name = "google_linked_at")
+    private LocalDateTime googleLinkedAt;
+
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
 
     @NotBlank(message = "Password is required")
     @Size(min = 8, message = "Password must be at least 8 characters")
@@ -101,6 +111,10 @@ public class User extends BaseEntity implements UserDetails, Principal, Serializ
     @Override
     public String getName() {
         return email;
+    }
+
+    public boolean isDeleted() {
+        return deletedAt != null;
     }
 
     // Convenience method

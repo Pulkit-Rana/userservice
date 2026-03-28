@@ -6,8 +6,11 @@ import org.springframework.http.HttpStatus;
  * User-domain specific exceptions (registration, activation, profile lifecycle).
  * Keep authentication/authorization failures in security layer unless strictly user-state related.
  *
- * Conventions:
- *  - type:  https://syncnest.dev/problems/<slug>
+ * All exceptions now include:
+ *  - Error code: Machine-readable code (USER_001, USER_002, etc.)
+ *  - Detailed reason: Descriptive failure message for API response
+ *  - HTTP Status: Appropriate HTTP status code
+ *  - Type: RFC 7807 problem type URI
  */
 public final class UserExceptions {
 
@@ -19,7 +22,8 @@ public final class UserExceptions {
             super(HttpStatus.NOT_FOUND,
                     "https://syncnest.dev/problems/user-not-found",
                     "User Not Found",
-                    detail);
+                    ErrorCode.USER_001,
+                    detail != null ? detail : ErrorCode.USER_001.getMessage());
         }
     }
 
@@ -28,8 +32,9 @@ public final class UserExceptions {
         public UserAlreadyExists(String email) {
             super(HttpStatus.CONFLICT,
                     "https://syncnest.dev/problems/user-already-exists",
-                    "User with email '" + email + "' already exists.",
-                    email);
+                    "User Already Exists",
+                    ErrorCode.USER_002,
+                    "An account with email '" + maskEmail(email) + "' already exists.");
         }
     }
 
@@ -39,7 +44,8 @@ public final class UserExceptions {
             super(HttpStatus.LOCKED,
                     "https://syncnest.dev/problems/user-inactive",
                     "User Inactive",
-                    detail);
+                    ErrorCode.USER_003,
+                    detail != null ? detail : ErrorCode.USER_003.getMessage());
         }
     }
 
@@ -52,7 +58,8 @@ public final class UserExceptions {
             super(HttpStatus.BAD_REQUEST,
                     "https://syncnest.dev/problems/invalid-user-input",
                     "Invalid User Input",
-                    detail);
+                    ErrorCode.USER_007,
+                    detail != null ? detail : ErrorCode.USER_007.getMessage());
         }
     }
 
@@ -65,7 +72,8 @@ public final class UserExceptions {
             super(HttpStatus.PRECONDITION_FAILED,
                     "https://syncnest.dev/problems/user-precondition-failed",
                     "User Precondition Failed",
-                    detail);
+                    ErrorCode.USER_005,
+                    detail != null ? detail : ErrorCode.USER_005.getMessage());
         }
     }
 
@@ -77,7 +85,37 @@ public final class UserExceptions {
             super(HttpStatus.CONFLICT,
                     "https://syncnest.dev/problems/user-update-conflict",
                     "User Update Conflict",
-                    detail);
+                    ErrorCode.USER_006,
+                    detail != null ? detail : ErrorCode.USER_006.getMessage());
         }
+    }
+
+    /** 423 Locked – User account is locked. */
+    public static final class UserLocked extends ApiException {
+        public UserLocked(String detail) {
+            super(HttpStatus.LOCKED,
+                    "https://syncnest.dev/problems/user-locked",
+                    "User Locked",
+                    ErrorCode.USER_004,
+                    detail != null ? detail : ErrorCode.USER_004.getMessage());
+        }
+    }
+
+    /** 412 Precondition Failed – Email not verified. */
+    public static final class EmailNotVerified extends ApiException {
+        public EmailNotVerified(String detail) {
+            super(HttpStatus.PRECONDITION_FAILED,
+                    "https://syncnest.dev/problems/email-not-verified",
+                    "Email Not Verified",
+                    ErrorCode.USER_008,
+                    detail != null ? detail : ErrorCode.USER_008.getMessage());
+        }
+    }
+
+    private static String maskEmail(String email) {
+        if (email == null || email.length() < 3) return "***";
+        int atIndex = email.indexOf('@');
+        if (atIndex <= 1) return "***@***";
+        return email.charAt(0) + "***" + email.substring(atIndex);
     }
 }

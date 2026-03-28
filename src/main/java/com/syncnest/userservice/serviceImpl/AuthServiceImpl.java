@@ -2,13 +2,17 @@ package com.syncnest.userservice.serviceImpl;
 
 import com.syncnest.userservice.SecurityConfig.JwtTokenProviderConfig;
 import com.syncnest.userservice.dto.*;
+import com.syncnest.userservice.entity.AuditEventType;
+import com.syncnest.userservice.entity.AuditOutcome;
 import com.syncnest.userservice.entity.AuthProvider;
-import com.syncnest.userservice.entity.DeviceMetadata;
 import com.syncnest.userservice.entity.DeviceType;
 import com.syncnest.userservice.entity.User;
 import com.syncnest.userservice.repository.UserRepository;
+import com.syncnest.userservice.service.AuditHistoryService;
 import com.syncnest.userservice.service.AuthService;
+import com.syncnest.userservice.service.DeviceMetadataService;
 import com.syncnest.userservice.service.RefreshTokenService;
+import com.syncnest.userservice.utils.RequestMetadataExtractor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -19,128 +23,152 @@ import org.springframework.stereotype.Service;
 
 import java.time.Clock;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.util.HashSet;
 import java.util.Objects;
 import java.util.UUID;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
-
 public class AuthServiceImpl implements AuthService {
 
     private final AuthenticationManager authenticationManager;
     private final UserRepository userRepository;
     private final JwtTokenProviderConfig jwtTokenProvider;
     private final RefreshTokenService refreshTokenService;
+    private final AuditHistoryService auditHistoryService;
+    private final DeviceMetadataService deviceMetadataService;
+    private final RequestMetadataExtractor extractor;
 
     private final Clock clock = Clock.systemUTC();
+
+    // ─── login ───────────────────────────────────────────────────────────────
 
     @Override
     public LoginResponse login(LoginRequest request) throws BadCredentialsException {
         final String email = safeEmail(request.getEmail());
-        final String password = Objects.requireNonNull(request.getPassword(), "password is required");
+        Objects.requireNonNull(request.getPassword(), "password is required");
 
         try {
-            authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(email, password));
+            authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(email, request.getPassword()));
         } catch (AuthenticationException ex) {
+            auditHistoryService.record(AuditEventType.LOGIN, AuditOutcome.FAILURE,
+                    null, email,
+                    request.getDeviceId(), request.getIp(), request.getUserAgent(),
+                    null, "INVALID_CREDENTIALS");
             throw new BadCredentialsException("Invalid email or password");
         }
 
-        User user = userRepository.findByEmail(email)
+        User user = userRepository.findByEmailAndDeletedAtIsNull(email)
                 .orElseThrow(() -> new BadCredentialsException("Invalid email or password"));
 
-        if (!user.isEnabled() || user.isLocked()) {
+        if (user.isDeleted() || !user.isEnabled() || user.isLocked()) {
+            auditHistoryService.record(AuditEventType.LOGIN, AuditOutcome.FAILURE,
+                    user, email,
+                    request.getDeviceId(), request.getIp(), request.getUserAgent(),
+                    null, user.isDeleted() ? "ACCOUNT_DELETED" : "ACCOUNT_SUSPENDED");
             throw new BadCredentialsException("Account Suspended");
         }
 
-        // Build DeviceContext from the request (nulls are fine)
-        DeviceContext ctx = DeviceContext.builder()
-                .deviceId(request.getDeviceId())
-                .clientId(request.getClientId())
-                .location(request.getLocation())
-                .provider(defaultIfNull(request.getProvider(), AuthProvider.LOCAL))
-                .deviceType(defaultIfNull(request.getDeviceType(), DeviceType.UNKNOWN))
-                .build();
-
+        DeviceContext ctx = buildContext(request);
         LoginResponse resp = issueTokensFor(user, ctx, true);
+
+        auditHistoryService.record(AuditEventType.LOGIN, AuditOutcome.SUCCESS,
+                user, email,
+                request.getDeviceId(), request.getIp(), request.getUserAgent(),
+                null, "LOGIN_SUCCESS");
 
         log.info("Login success for email={}", email);
         return resp;
     }
 
+    // ─── issueTokensFor ──────────────────────────────────────────────────────
+
     @Override
     public LoginResponse issueTokensFor(User user, DeviceContext ctx, boolean recordDeviceMetadata) {
         Objects.requireNonNull(user, "user is required");
-
-        // Normalize + default the context once
-        NormalizedContext nctx = normalize(ctx);
-
-        // 1) Access token + validity
-        String accessToken = jwtTokenProvider.generateToken(user.getEmail());
-        long expiresIn = jwtTokenProvider.getTokenValiditySeconds();
-
-        // 2) Refresh token bound to normalized deviceId
-        RefreshTokenResponse rt = refreshTokenService.issue(user, nctx.deviceId());
-
-        // 3) Optionally record device metadata (audit)
-        if (recordDeviceMetadata) {
-            recordDeviceLogin(user, nctx);
+        if (user.isDeleted() || !user.isEnabled() || user.isLocked()) {
+            throw new BadCredentialsException("Account Suspended");
         }
 
-        // 4) User summary
-        UserSummary summary = UserSummary.builder()
-                .id(safeId(user.getId()))
-                .email(user.getEmail())
-                // If you store a display name in Profile, map here:
-                // .displayName(user.getProfile() != null ? user.getProfile().getFullName() : null)
-                .emailVerified(user.isVerified())
-                .build();
+        DeviceContext enriched = enrich(ctx);
 
-        // 5) Response
+        // 1) Access token
+        String accessToken = jwtTokenProvider.generateToken(user.getEmail());
+        long expiresIn     = jwtTokenProvider.getTokenValiditySeconds();
+
+        // 2) Refresh token bound to deviceId
+        RefreshTokenResponse rt = refreshTokenService.issue(user, enriched.getDeviceId());
+
+        // 3) Async device upsert — best effort, never blocks auth
+        if (recordDeviceMetadata) {
+            deviceMetadataService.upsertDeviceLogin(user, enriched);
+        }
+
+        // 4) Response
         return LoginResponse.builder()
                 .accessToken(accessToken)
                 .expiresIn(expiresIn)
                 .refreshToken(rt.getRefreshToken())
+                .deviceId(enriched.getDeviceId())
                 .issuedAt(Instant.now(clock))
-                .user(summary)
+                .user(UserSummary.builder()
+                        .id(safeId(user.getId()))
+                        .email(user.getEmail())
+                        .emailVerified(user.isVerified())
+                        .build())
                 .build();
     }
 
-    // -------------------- helpers --------------------
+    // ─── Helpers ─────────────────────────────────────────────────────────────
 
-    private void recordDeviceLogin(User user, NormalizedContext nctx) {
-        DeviceMetadata meta = DeviceMetadata.builder()
-                .user(user)
-                .provider(nctx.provider())
-                .deviceType(nctx.deviceType())
-                .location(nctx.location())
-                .lastLoginAt(LocalDateTime.now(clock))
+    /**
+     * Builds an initial DeviceContext from a LoginRequest.
+     * IP and User-Agent are expected to already be set on the request
+     * (overwritten by the controller from real HTTP headers before this call).
+     */
+    private DeviceContext buildContext(LoginRequest request) {
+        String ua = request.getUserAgent();
+        return DeviceContext.builder()
+                .deviceId(request.getDeviceId())
+                .clientId(request.getClientId())
+                .ip(request.getIp())
+                .userAgent(ua)
+                .os(extractor.parseOs(ua))
+                .browser(extractor.parseBrowser(ua))
+                .provider(defaultIfNull(request.getProvider(), AuthProvider.LOCAL))
+                .deviceType(extractor.parseDeviceType(ua))
                 .build();
-
-        if (user.getDevices() == null) {
-            user.setDevices(new HashSet<>());
-        }
-        user.getDevices().add(meta);
-        userRepository.save(user);
     }
 
-    /** Single place for device normalization + defaults. */
-    private NormalizedContext normalize(DeviceContext raw) {
-        // deviceId policy: deviceId > clientId > "unknown"; trim; cap length
+    /**
+     * Normalizes a raw DeviceContext: applies defaults, parses UA, caps deviceId length.
+     * Always returns a fully populated (non-null field) context.
+     */
+    private DeviceContext enrich(DeviceContext raw) {
+        if (raw == null) raw = DeviceContext.builder().build();
+
+        String ua       = nvl(raw.getUserAgent());
+        String os       = raw.getOs() != null ? raw.getOs() : extractor.parseOs(ua);
+        String browser  = raw.getBrowser() != null ? raw.getBrowser() : extractor.parseBrowser(ua);
+        DeviceType type = raw.getDeviceType() != null && raw.getDeviceType() != DeviceType.UNKNOWN
+                ? raw.getDeviceType() : extractor.parseDeviceType(ua);
+
         String deviceId = firstNonBlank(raw.getDeviceId(), raw.getClientId());
         deviceId = normalizeDeviceId(deviceId);
 
-        AuthProvider provider = defaultIfNull(raw.getProvider(), AuthProvider.LOCAL);
-        DeviceType deviceType = defaultIfNull(raw.getDeviceType(), DeviceType.UNKNOWN);
-        String location = trimToNull(raw.getLocation());
-
-        return new NormalizedContext(deviceId, provider, deviceType, location);
+        return DeviceContext.builder()
+                .deviceId(deviceId)
+                .clientId(raw.getClientId())
+                .ip(nvl(raw.getIp()))
+                .userAgent(ua)
+                .os(os)
+                .browser(browser)
+                .provider(defaultIfNull(raw.getProvider(), AuthProvider.LOCAL))
+                .deviceType(type)
+                .location(raw.getLocation())
+                .build();
     }
-
-    /** Compact record for normalized values. */
-    private record NormalizedContext(String deviceId, AuthProvider provider, DeviceType deviceType, String location) {}
 
     private String safeEmail(String email) {
         if (email == null) throw new BadCredentialsException("Invalid email or password");
@@ -166,11 +194,7 @@ public class AuthServiceImpl implements AuthService {
         return value != null ? value : defaultVal;
     }
 
-    private String trimToNull(String s) {
-        if (s == null) return null;
-        String t = s.trim();
-        return t.isEmpty() ? null : t;
+    private String nvl(String s) {
+        return s == null ? "" : s;
     }
-
-    private String safe(String s) { return s == null ? "null" : s; }
 }

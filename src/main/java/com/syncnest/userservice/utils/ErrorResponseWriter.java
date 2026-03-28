@@ -65,6 +65,62 @@ public class ErrorResponseWriter {
         objectMapper.writeValue(resp.getOutputStream(), pd);
     }
 
+    /**
+     * Write error response with error code and detailed reason
+     */
+    public void writeWithErrorCode(@NonNull HttpServletRequest req,
+                                   @NonNull HttpServletResponse resp,
+                                   @NonNull HttpStatus status,
+                                   String type,
+                                   @NonNull String title,
+                                   @NonNull String detail,
+                                   @NonNull String errorCode) throws IOException {
+        
+        if (resp.isCommitted()) return;
+
+        ProblemDetail pd = ProblemDetail.forStatus(status);
+        if (type != null && !type.isBlank()) {
+            pd.setType(URI.create(type));
+        }
+        pd.setTitle(title);
+        pd.setDetail(detail);
+        pd.setInstance(URI.create(req.getRequestURI()));
+
+        // Error code and metadata
+        pd.setProperty("errorCode", errorCode);
+        pd.setProperty("timestamp", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        pd.setProperty("path", req.getRequestURI());
+        pd.setProperty("requestId", resolveRequestId(req, resp));
+
+        resp.setStatus(status.value());
+        resp.setHeader("Cache-Control", "no-store");
+        resp.setHeader("Pragma", "no-cache");
+        resp.setCharacterEncoding("UTF-8");
+        resp.setContentType("application/problem+json");
+
+        objectMapper.writeValue(resp.getOutputStream(), pd);
+    }
+
+    /**
+     * Write error response from formatted JSON string
+     */
+    public void writeJson(@NonNull HttpServletRequest req,
+                         @NonNull HttpServletResponse resp,
+                         @NonNull HttpStatus status,
+                         @NonNull String jsonBody) throws IOException {
+        
+        if (resp.isCommitted()) return;
+
+        resp.setStatus(status.value());
+        resp.setHeader("Cache-Control", "no-store");
+        resp.setHeader("Pragma", "no-cache");
+        resp.setCharacterEncoding("UTF-8");
+        resp.setContentType("application/problem+json");
+
+        resp.getWriter().write(jsonBody);
+        resp.getWriter().flush();
+    }
+
     private String resolveRequestId(HttpServletRequest req, HttpServletResponse resp) {
         String id = resp.getHeader(REQUEST_ID_HEADER);
         if (id == null || id.isBlank()) {

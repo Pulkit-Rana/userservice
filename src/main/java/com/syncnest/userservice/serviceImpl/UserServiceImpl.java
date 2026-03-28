@@ -30,10 +30,10 @@ public class UserServiceImpl implements UserDetailsService {
         final String normalized = normalizeEmail(email);
         log.debug("Loading user by email: {}", normalized);
 
-        User user = userRepository.findByEmail(normalized)
+        User user = userRepository.findByEmailAndDeletedAtIsNull(normalized)
                 .orElseThrow(() -> new UsernameNotFoundException("User not found"));
 
-        // Defense-in-depth: block unusable accounts with a generic error (no enumeration)
+        // Defense-in-depth: only verified, unlocked, enabled, non-deleted users may authenticate.
         if (user.isDeleted() || !user.isVerified() || user.isLocked() || !user.isEnabled()) {
             throw new UsernameNotFoundException("User not found");
         }

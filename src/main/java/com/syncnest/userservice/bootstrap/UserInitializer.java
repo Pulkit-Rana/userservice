@@ -1,9 +1,10 @@
 package com.syncnest.userservice.bootstrap;
 
 import com.syncnest.userservice.entity.*;
+import com.syncnest.userservice.repository.AuditHistoryRepository;
 import com.syncnest.userservice.repository.DeviceMetadataRepository;
 import com.syncnest.userservice.repository.UserRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -13,6 +14,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.Locale;
 
 @Slf4j
 @Component
@@ -20,8 +22,12 @@ import java.time.LocalDateTime;
 @RequiredArgsConstructor
 public class UserInitializer implements CommandLineRunner {
 
+    private static final String ADMIN_EMAIL = "admin@example.com";
+    private static final String USER_EMAIL = "user@example.com";
+
     private final UserRepository userRepository;
     private final DeviceMetadataRepository deviceMetadataRepository;
+    private final AuditHistoryRepository auditHistoryRepository;
     private final PasswordEncoder passwordEncoder;
 
     @Value("${app.init.admin.password}")
@@ -33,81 +39,124 @@ public class UserInitializer implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) {
-        // Admin
-        User admin = createUserIfNotExists(
-                "admin@example.com",
+        SeedResult admin = createUserIfNotExists(
+                ADMIN_EMAIL,
                 ensureEncoded(adminPlainPassword),
                 UserRole.ROLE_ADMIN,
                 "Admin",
                 "Super",
                 "Admin"
         );
-        createTwoDevicesIfMissing(admin);
 
-        // Normal user
-        User normal = createUserIfNotExists(
-                "user@example.com",
+        SeedResult normal = createUserIfNotExists(
+                USER_EMAIL,
                 ensureEncoded(userPlainPassword),
                 UserRole.ROLE_USER,
                 "Regular",
                 "Test",
                 "User"
         );
-        createTwoDevicesIfMissing(normal);
+
+        if (!admin.created() && !normal.created()) {
+            log.info("Bootstrap users already exist. Skipping startup seed data.");
+            return;
+        }
+
+        if (admin.created()) {
+            createBootstrapDevicesAndAudit(admin.user(), "admin");
+        }
+        if (normal.created()) {
+            createBootstrapDevicesAndAudit(normal.user(), "user");
+        }
     }
 
-    private void createTwoDevicesIfMissing(User user) {
+    private void createBootstrapDevicesAndAudit(User user, String keyPrefix) {
         if (user == null) return;
 
-        // Device #1
         upsertSimpleDevice(
                 user,
+                keyPrefix + "-desktop",
                 "New York, US",
                 DeviceType.DESKTOP,
                 LocalDateTime.now().minusDays(1)
         );
 
-        // Device #2
         upsertSimpleDevice(
                 user,
+                keyPrefix + "-mobile",
                 "San Francisco, US",
                 DeviceType.MOBILE,
                 LocalDateTime.now().minusHours(12)
         );
+
+        createBootstrapAuditIfMissing(user, keyPrefix + "-desktop");
     }
 
-    /**
-     * Idempotent insert using (user, deviceType, location) as a natural key for bootstrap.
-     */
     private void upsertSimpleDevice(
             User user,
+            String deviceId,
             String location,
             DeviceType deviceType,
             LocalDateTime lastLoginAt
     ) {
         boolean exists = deviceMetadataRepository
-                .existsByUserAndDeviceTypeAndLocation(user, deviceType, location);
+                .findByUserAndDeviceId(user, deviceId)
+                .isPresent();
 
         if (exists) {
-            log.info("DeviceMetadata already present for user={} type={} location={}",
-                    user.getEmail(), deviceType, location);
+            log.info("DeviceMetadata already present for user={} deviceId={}", user.getEmail(), deviceId);
             return;
         }
 
         DeviceMetadata dm = DeviceMetadata.builder()
                 .user(user)
+                .deviceId(deviceId)
+                .ipAddress("127.0.0.1")
+                .userAgent("bootstrap-initializer")
+                .os("N/A")
+                .browser("N/A")
                 .location(location)
                 .provider(AuthProvider.LOCAL)
                 .deviceType(deviceType)
+                .firstSeenAt(lastLoginAt.minusMinutes(5))
                 .lastLoginAt(lastLoginAt)
                 .build();
 
         deviceMetadataRepository.save(dm);
-        log.info("Created DeviceMetadata for user={} type={} location={}",
-                user.getEmail(), deviceType, location);
+        log.info("Created DeviceMetadata for user={} deviceId={}", user.getEmail(), deviceId);
     }
 
-    private User createUserIfNotExists(
+    private void createBootstrapAuditIfMissing(User user, String deviceId) {
+        String normalizedEmail = user.getEmail().trim().toLowerCase(Locale.ROOT);
+        boolean exists = auditHistoryRepository.existsByUserEmailAndEventTypeAndDetails(
+                normalizedEmail,
+                AuditEventType.REGISTRATION,
+                "BOOTSTRAP_USER_CREATED"
+        );
+
+        if (exists) {
+            log.info("Audit bootstrap entry already present for user={} details={}", normalizedEmail, "BOOTSTRAP_USER_CREATED");
+            return;
+        }
+
+        AuditHistory audit = AuditHistory.builder()
+                .user(user)
+                .eventType(AuditEventType.REGISTRATION)
+                .outcome(AuditOutcome.SUCCESS)
+                .userEmail(normalizedEmail)
+                .deviceId(deviceId)
+                .ipAddress("127.0.0.1")
+                .userAgent("bootstrap-initializer")
+                .location("New York, US")
+                .details("BOOTSTRAP_USER_CREATED")
+                .occurredAt(LocalDateTime.now())
+                .build();
+
+        auditHistoryRepository.save(audit);
+        log.info("Created bootstrap audit for user={} details={}", normalizedEmail, "BOOTSTRAP_USER_CREATED");
+    }
+
+    private SeedResult createUserIfNotExists(
             String email,
             String password,
             UserRole role,
@@ -115,28 +164,37 @@ public class UserInitializer implements CommandLineRunner {
             String firstName,
             String lastName
     ) {
-        return userRepository.findByEmail(email).orElseGet(() -> {
-            User user = User.builder()
-                    .email(email)
-                    .password(password)
-                    .role(role)
-                    .enabled(true)
-                    .isLocked(false)
-                    .isVerified(true)
-                    // .provider(AuthProvider.LOCAL)
-                    .build();
+        return userRepository.findByEmailAndDeletedAtIsNull(email)
+                .map(existing -> {
+                    log.info("{} '{}' already exists. Skipping user creation.", displayName, email);
+                    return new SeedResult(existing, false);
+                })
+                .or(() -> userRepository.findDeletedByEmail(email)
+                        .map(existing -> {
+                            log.info("{} '{}' exists in soft-deleted state. Leaving it untouched.", displayName, email);
+                            return new SeedResult(existing, false);
+                        }))
+                .orElseGet(() -> {
+                    User user = User.builder()
+                            .email(email)
+                            .password(password)
+                            .role(role)
+                            .enabled(true)
+                            .isLocked(false)
+                            .isVerified(true)
+                            .build();
 
-            Profile profile = Profile.builder()
-                    .user(user)
-                    .firstName(firstName)
-                    .lastName(lastName)
-                    .build();
+                    Profile profile = Profile.builder()
+                            .user(user)
+                            .firstName(firstName)
+                            .lastName(lastName)
+                            .build();
 
-            user.setProfile(profile);
-            User saved = userRepository.save(user);
-            log.info("{} '{}' with profile added successfully.", displayName, email);
-            return saved;
-        });
+                    user.setProfile(profile);
+                    User saved = userRepository.save(user);
+                    log.info("{} '{}' with profile added successfully.", displayName, email);
+                    return new SeedResult(saved, true);
+                });
     }
 
     private String ensureEncoded(String rawOrEncoded) {
@@ -147,5 +205,8 @@ public class UserInitializer implements CommandLineRunner {
 
     private boolean isBcrypt(String value) {
         return value.startsWith("$2a$") || value.startsWith("$2b$") || value.startsWith("$2y$");
+    }
+
+    private record SeedResult(User user, boolean created) {
     }
 }

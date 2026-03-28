@@ -6,10 +6,11 @@ import org.springframework.http.HttpStatus;
  * Typed exceptions for failures caused by external/third-party systems.
  * These extend ApiException so GlobalExceptionHandler will render RFC7807 ProblemDetails.
  *
- * Conventions:
- * - type:    https://syncnest.dev/problems/<slug>
- * - title:   short human-readable summary
- * - detail:  free-form (safe) message; avoid sensitive payloads
+ * All exceptions include:
+ *  - Error code: Machine-readable code (EXTERNAL_*, SYSTEM_*)
+ *  - Detailed reason: Specific description of external failure
+ *  - HTTP Status: Appropriate HTTP status code
+ *  - Type: RFC 7807 problem type URI
  *
  * Suggested usage:
  * - Throw from adapters/clients that call external services.
@@ -25,7 +26,8 @@ public final class ExternalExceptions {
             super(HttpStatus.BAD_GATEWAY,
                     "https://syncnest.dev/problems/upstream-bad-gateway",
                     "Upstream Bad Gateway",
-                    detail);
+                    ErrorCode.EXTERNAL_005,
+                    detail != null ? detail : ErrorCode.EXTERNAL_005.getMessage());
         }
     }
 
@@ -35,7 +37,8 @@ public final class ExternalExceptions {
             super(HttpStatus.SERVICE_UNAVAILABLE,
                     "https://syncnest.dev/problems/upstream-unavailable",
                     "Upstream Unavailable",
-                    detail);
+                    ErrorCode.EXTERNAL_003,
+                    detail != null ? detail : ErrorCode.EXTERNAL_003.getMessage());
         }
     }
 
@@ -45,7 +48,8 @@ public final class ExternalExceptions {
             super(HttpStatus.GATEWAY_TIMEOUT,
                     "https://syncnest.dev/problems/upstream-timeout",
                     "Upstream Timeout",
-                    detail);
+                    ErrorCode.EXTERNAL_004,
+                    detail != null ? detail : ErrorCode.EXTERNAL_004.getMessage());
         }
     }
 
@@ -55,7 +59,8 @@ public final class ExternalExceptions {
             super(HttpStatus.TOO_MANY_REQUESTS,
                     "https://syncnest.dev/problems/external-rate-limited",
                     "External Rate Limited",
-                    detail);
+                    ErrorCode.EXTERNAL_010,
+                    detail != null ? detail : ErrorCode.EXTERNAL_010.getMessage());
         }
     }
 
@@ -65,7 +70,8 @@ public final class ExternalExceptions {
             super(HttpStatus.UNAUTHORIZED,
                     "https://syncnest.dev/problems/external-auth-failed",
                     "External Authentication Failed",
-                    detail);
+                    ErrorCode.EXTERNAL_007,
+                    detail != null ? detail : "Failed to authenticate with external service");
         }
     }
 
@@ -75,7 +81,8 @@ public final class ExternalExceptions {
             super(HttpStatus.BAD_REQUEST,
                     "https://syncnest.dev/problems/external-bad-request",
                     "External Bad Request",
-                    detail);
+                    ErrorCode.EXTERNAL_009,
+                    detail != null ? detail : "External service rejected the request as invalid");
         }
     }
 
@@ -88,7 +95,8 @@ public final class ExternalExceptions {
             super(HttpStatus.UNPROCESSABLE_ENTITY,
                     "https://syncnest.dev/problems/external-unprocessable",
                     "External Unprocessable",
-                    detail);
+                    ErrorCode.EXTERNAL_009,
+                    detail != null ? detail : "External service could not process the request");
         }
     }
 
@@ -101,7 +109,41 @@ public final class ExternalExceptions {
             super(HttpStatus.BAD_GATEWAY,
                     "https://syncnest.dev/problems/external-contract-violation",
                     "External Contract Violation",
-                    detail);
+                    ErrorCode.EXTERNAL_005,
+                    detail != null ? detail : "External service response violated expected contract");
+        }
+    }
+
+    /** 503 Service Unavailable – Email service is unavailable. */
+    public static final class EmailServiceUnavailable extends ApiException {
+        public EmailServiceUnavailable(String detail) {
+            super(HttpStatus.SERVICE_UNAVAILABLE,
+                    "https://syncnest.dev/problems/email-service-unavailable",
+                    "Email Service Unavailable",
+                    ErrorCode.EXTERNAL_001,
+                    detail != null ? detail : ErrorCode.EXTERNAL_001.getMessage());
+        }
+    }
+
+    /** 500 Internal Server Error – Email delivery failed. */
+    public static final class EmailDeliveryFailed extends ApiException {
+        public EmailDeliveryFailed(String detail) {
+            super(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "https://syncnest.dev/problems/email-delivery-failed",
+                    "Email Delivery Failed",
+                    ErrorCode.EXTERNAL_002,
+                    detail != null ? detail : ErrorCode.EXTERNAL_002.getMessage());
+        }
+    }
+
+    /** 502 Bad Gateway – Geolocation service error. */
+    public static final class GeolocationServiceError extends ApiException {
+        public GeolocationServiceError(String detail) {
+            super(HttpStatus.BAD_GATEWAY,
+                    "https://syncnest.dev/problems/geolocation-error",
+                    "Geolocation Service Error",
+                    ErrorCode.EXTERNAL_006,
+                    detail != null ? detail : ErrorCode.EXTERNAL_006.getMessage());
         }
     }
 }

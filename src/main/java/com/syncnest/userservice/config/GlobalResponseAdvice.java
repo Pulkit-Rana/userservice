@@ -45,7 +45,7 @@ public class GlobalResponseAdvice implements ResponseBodyAdvice<Object> {
     @ExceptionHandler(org.springframework.security.authentication.BadCredentialsException.class)
     @ResponseStatus(HttpStatus.UNAUTHORIZED)
     public ApiResponse<Void> onBadCreds(Exception ex, HttpServletRequest req) {
-        log.warn("Unauthorized: {}", ex.getMessage());
+        log.warn("BadCredentialsException: {} - RemoteAddr: {}", ex.getMessage(), req.getRemoteAddr());
         return ApiResponse.<Void>builder()
                 .success(false).code("UNAUTHORIZED").message("Invalid email or password")
                 .timestamp(Instant.now())
@@ -55,6 +55,10 @@ public class GlobalResponseAdvice implements ResponseBodyAdvice<Object> {
     @ExceptionHandler(MethodArgumentNotValidException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> onValidation(MethodArgumentNotValidException ex) {
+        log.warn("Validation error: {} - Fields: {}", ex.getMessage(), 
+                ex.getBindingResult().getFieldErrors().stream()
+                        .map(e -> e.getField() + ":" + e.getDefaultMessage())
+                        .toList());
         return ApiResponse.<Void>builder()
                 .success(false).code("VALIDATION_ERROR").message("Invalid request")
                 .timestamp(Instant.now())
@@ -64,7 +68,7 @@ public class GlobalResponseAdvice implements ResponseBodyAdvice<Object> {
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public ApiResponse<Void> onAny(Exception ex) {
-        log.error("Server error", ex);
+        log.error("Unhandled exception: {} - Type: {}", ex.getMessage(), ex.getClass().getSimpleName(), ex);
         return ApiResponse.<Void>builder()
                 .success(false).code("INTERNAL_ERROR").message("Something went wrong")
                 .timestamp(Instant.now())
@@ -88,22 +92,35 @@ public class GlobalResponseAdvice implements ResponseBodyAdvice<Object> {
                                   @NonNull ServerHttpRequest request,
                                   @NonNull ServerHttpResponse response) {
 
+        String path = request.getURI().getPath();
+        request.getMethod();
+        String method = request.getMethod().name();
+        
+        log.debug("Response wrapping for {} {} - ContentType: {}", method, path, selectedContentType);
+
         // skip RFC 7807
-        if (body instanceof ProblemDetail) return body;
+        if (body instanceof ProblemDetail) {
+            log.debug("Skipping ProblemDetail response");
+            return body;
+        }
 
         // skip swagger/openapi
-        String path = request.getURI().getPath();
         if (path.startsWith("/v3/api-docs") || path.startsWith("/swagger") || path.startsWith("/swagger-ui")) {
+            log.debug("Skipping swagger/openapi path");
             return body;
         }
 
         // only JSON-like
         if (selectedContentType != null && !isJsonLike(selectedContentType)) {
+            log.debug("Skipping non-JSON content type: {}", selectedContentType);
             return body;
         }
 
         // already wrapped
-        if (body instanceof ApiResponse<?>) return body;
+        if (body instanceof ApiResponse<?>) {
+            log.debug("Response already wrapped, skipping");
+            return body;
+        }
 
         // resolve @ResponseMessage (if present)
         var ann = resolveAnn(returnType);
@@ -111,38 +128,56 @@ public class GlobalResponseAdvice implements ResponseBodyAdvice<Object> {
         // ResponseEntity: preserve status/headers; wrap only 2xx & non-null (not 204)
         if (body instanceof ResponseEntity<?> re) {
             HttpStatusCode sc = re.getStatusCode();
-            if (!sc.is2xxSuccessful()) return body;
-            if (sc.equals(HttpStatus.NO_CONTENT)) return body;
+            log.debug("ResponseEntity with status: {}", sc);
+            
+            if (!sc.is2xxSuccessful()) {
+                log.debug("Non-2xx status, skipping wrap");
+                return body;
+            }
+            if (sc.equals(HttpStatus.NO_CONTENT)) {
+                log.debug("204 No Content, skipping wrap");
+                return body;
+            }
 
             Object inner = re.getBody();
             if (inner instanceof ApiResponse<?> || inner instanceof ProblemDetail) return body;
-            if (shouldSkip(inner, selectedContentType)) return body;
+            if (shouldSkip(inner, selectedContentType)) {
+                log.debug("Body should be skipped, returning as-is");
+                return body;
+            }
 
             // MappingJacksonValue passthrough
             if (inner instanceof MappingJacksonValue mjv) {
+                log.debug("Wrapping MappingJacksonValue from ResponseEntity");
                 Object wrapped = buildEnvelope(mjv.getValue(), ann, request, response);
                 mjv.setValue(wrapped);
                 return ResponseEntity.status(sc).headers(re.getHeaders()).body(mjv);
             }
 
             Object wrapped = buildEnvelope(inner, ann, request, response);
+            log.info("Wrapped ResponseEntity response for {} {} - Status: {}", method, path, sc);
             return ResponseEntity.status(sc).headers(re.getHeaders()).body(wrapped);
         }
 
         // non-ResponseEntity: get current status
         HttpStatus current = currentStatus(response);
-        if (!current.is2xxSuccessful() || current == HttpStatus.NO_CONTENT) return body;
+        if (!current.is2xxSuccessful() || current == HttpStatus.NO_CONTENT) {
+            log.debug("Non-2xx or no-content status ({}), skipping wrap", current);
+            return body;
+        }
 
         // allow @ResponseMessage to override 2xx status
         if (ann.httpStatus != null && response instanceof ServletServerHttpResponse sResp) {
             sResp.getServletResponse().setStatus(ann.httpStatus);
             HttpStatus overridden = HttpStatus.valueOf(ann.httpStatus);
+            log.debug("Overriding HTTP status to: {}", ann.httpStatus);
             if (!overridden.is2xxSuccessful() || overridden == HttpStatus.NO_CONTENT) return body;
         }
 
         // String return types need explicit JSON string
         if (returnType.getParameterType() == String.class) {
             try {
+                log.debug("Wrapping String return type as JSON");
                 return objectMapper.writeValueAsString(buildEnvelope(body, ann, request, response));
             } catch (Exception e) {
                 log.warn("Failed to serialize ApiResponse for String return type: {}", e.toString());
@@ -153,19 +188,25 @@ public class GlobalResponseAdvice implements ResponseBodyAdvice<Object> {
         // skip files/streams; but wrap null as data=null (unless 204 which we handled)
         if (shouldSkip(body, selectedContentType)) {
             if (body == null) {
+                log.debug("Wrapping null response body");
                 return buildEnvelope(null, ann, request, response);
             }
+            log.debug("Skipping file/stream response");
             return body;
         }
 
         // MappingJacksonValue passthrough
         if (body instanceof MappingJacksonValue mjv) {
+            log.debug("Wrapping MappingJacksonValue");
             Object wrapped = buildEnvelope(mjv.getValue(), ann, request, response);
             mjv.setValue(wrapped);
             return mjv;
         }
 
-        return buildEnvelope(body, ann, request, response);
+        Object finalWrapped = buildEnvelope(body, ann, request, response);
+        log.info("Wrapped response for {} {} - BodyType: {}", method, path, 
+                body != null ? body.getClass().getSimpleName() : "null");
+        return finalWrapped;
     }
 
     // --------------- helpers ----------------
@@ -278,7 +319,7 @@ public class GlobalResponseAdvice implements ResponseBodyAdvice<Object> {
 
         String message = (ann != null && StringUtils.hasText(ann.value())) ? ann.value() : "OK";
         String code    = (ann != null && StringUtils.hasText(ann.code()))  ? ann.code()  : "OK";
-        boolean success = (ann != null) ? ann.success() : true;
+        boolean success = ann == null || ann.success();
 
         Integer httpStatus = null;
         if (ann != null && ann.httpStatus() > 0) httpStatus = ann.httpStatus();

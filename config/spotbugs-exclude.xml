@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- Spring DI / JPA / Lombok: known low-value SpotBugs categories for this codebase. -->
+    <Match>
+        <Class name="~com\.syncnest\.userservice\..*"/>
+        <Or>
+            <Bug pattern="EI_EXPOSE_REP"/>
+            <Bug pattern="EI_EXPOSE_REP2"/>
+            <Bug pattern="SE_BAD_FIELD"/>
+            <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
+            <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+            <Bug pattern="REC_CATCH_EXCEPTION"/>
+            <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+        </Or>
+    </Match>
+</FindBugsFilter>

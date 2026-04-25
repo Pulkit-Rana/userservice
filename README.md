@@ -80,7 +80,6 @@ src/
 │   │   ├── config/
 │   │   │   ├── RedisConfig.java                  # Lettuce Redis connection
 │   │   │   ├── CacheConfig.java                  # Caffeine in-memory cache
-│   │   │   ├── MailConfig.java                   # Gmail SMTP setup
 │   │   │   ├── OpenApiConfig.java                # Swagger / OpenAPI docs
 │   │   │   ├── GlobalResponseAdvice.java         # Wraps all responses in ApiResponse
 │   │   │   └── ResponseConfig.java               # Response formatting helpers
@@ -386,8 +385,9 @@ Key properties in `src/main/resources/application.properties`:
 | `refresh-token.max.count` | `3` | Max concurrent refresh tokens per user |
 | `spring.data.redis.host` | `127.0.0.1` | Redis host |
 | `spring.data.redis.port` | `6379` | Redis port |
-| `spring.mail.username` | *(Gmail address)* | Email sender |
-| `spring.mail.password` | *(App password)* | Gmail SMTP credential |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | *(from secret manager)* | Maps to `spring.mail.*`; never commit |
+| `SMTP_HOST` / `SMTP_PORT` | `smtp.gmail.com` / `587` | Optional overrides |
+| `MAIL_DEBUG` | `false` | Set `true` only for local SMTP troubleshooting |
 | `app.init.admin.password` | `adminPassword123` | Seeded admin password |
 | `app.init.user.password` | `userPassword123` | Seeded user password |
 

@@ -1,7 +1,9 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.5.4'
+    id 'org.springframework.boot' version '3.5.12'
     id 'io.spring.dependency-management' version '1.1.7'
+    id 'com.github.spotbugs' version '6.1.2'
+    id 'org.owasp.dependencycheck' version '11.1.1'
 }
 
 group = 'com.syncnest'
@@ -34,7 +36,7 @@ dependencies {
     runtimeOnly group: 'io.jsonwebtoken', name: 'jjwt-jackson', version: '0.12.6'
     implementation 'org.springframework.boot:spring-boot-starter-data-redis'
     implementation 'org.apache.commons:commons-pool2'
-    implementation("org.springframework.boot:spring-boot-starter-mail:3.5.0")
+    implementation 'org.springframework.boot:spring-boot-starter-mail'
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.1.0'
     testImplementation group: 'software.amazon.awssdk', name: 's3', version: '2.30.6'
     implementation group: 'org.modelmapper', name: 'modelmapper', version: '3.2.0'
@@ -47,10 +49,55 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.security:spring-security-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-    // https://mvnrepository.com/artifact/org.springframework.security/spring-security-oauth2-resource-server
-    implementation("org.springframework.security:spring-security-oauth2-resource-server:6.5.2")
+    implementation 'org.springframework.security:spring-security-oauth2-resource-server'
 }
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+spotbugs {
+    ignoreFailures = false
+}
+
+tasks.named('spotbugsMain') {
+    excludeFilter.set(file("${rootDir}/config/spotbugs-exclude.xml"))
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+dependencyCheck {
+    formats = ['HTML', 'JSON']
+    failBuildOnCVSS = 7f
+    suppressionFile = file("${rootDir}/config/dependency-check-suppressions.xml")
+    nvd {
+        // Re-use cached NVD data between runs (CI caches ~/.gradle/dependency-check-data).
+        validForHours = 168
+    }
+    analyzers {
+        assemblyEnabled = false
+        nodeEnabled = false
+        nuspecEnabled = false
+    }
+}
+
+// Load .env into bootRun so JWT_SECRET and other vars work from a local file (same as many IDEs).
+tasks.named('bootRun') {
+    def envFile = file('.env')
+    if (envFile.exists()) {
+        envFile.eachLine { line ->
+            def trimmed = line.trim()
+            if (trimmed && !trimmed.startsWith('#') && trimmed.contains('=')) {
+                def idx = trimmed.indexOf('=')
+                def key = trimmed.substring(0, idx).trim()
+                def val = trimmed.substring(idx + 1).trim()
+                if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                    val = val.substring(1, val.length() - 1)
+                }
+                environment key, val
+            }
+        }
+    }
 }

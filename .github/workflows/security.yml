@@ -1,0 +1,93 @@
+name: Security (SAST / SCA)
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+  schedule:
+    # Weekly OWASP dependency-check (NVD sync; set NVD_API_KEY secret to avoid long runs).
+    - cron: "0 6 * * 1"
+
+permissions:
+  actions: read
+  contents: write
+  security-events: write
+  pull-requests: read
+
+jobs:
+  codeql:
+    name: CodeQL (Java)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: java
+          build-mode: autobuild
+
+      - uses: github/codeql-action/analyze@v3
+
+  gradle-security:
+    name: SpotBugs + dependency graph
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: SpotBugs (SAST)
+        run: ./gradlew spotbugsMain --no-daemon
+
+      - name: Submit Gradle dependency graph (enables Dependency review on PRs)
+        uses: gradle/actions/dependency-submission@v4
+
+  dependency-review:
+    name: Dependency review (SCA)
+    needs: [gradle-security]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/dependency-review-action@v4
+
+  owasp-dependency-check:
+    name: OWASP Dependency-Check (SCA / NVD)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache OWASP NVD data
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/dependency-check-data
+          key: ${{ runner.os }}-owasp-dc-${{ hashFiles('**/build.gradle') }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: OWASP Dependency-Check
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: ./gradlew dependencyCheckAnalyze --no-daemon
+
+      - name: Upload dependency-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: build/reports/dependency-check-report.html

@@ -2,10 +2,12 @@ package com.syncnest.userservice.serviceImpl;
 
 import com.syncnest.userservice.dto.DeviceContext;
 import com.syncnest.userservice.dto.GoogleLoginRequest;
+import com.syncnest.userservice.dto.GoogleProfileSnapshot;
 import com.syncnest.userservice.dto.LoginResponse;
 import com.syncnest.userservice.entity.AuditEventType;
 import com.syncnest.userservice.entity.AuditOutcome;
 import com.syncnest.userservice.entity.AuthProvider;
+import com.syncnest.userservice.entity.Profile;
 import com.syncnest.userservice.entity.User;
 import com.syncnest.userservice.entity.UserRole;
 import com.syncnest.userservice.repository.UserRepository;
@@ -27,6 +29,7 @@ import org.springframework.security.oauth2.jwt.JwtTimestampValidator;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.Locale;
@@ -60,25 +63,7 @@ public class GoogleAuthServiceImpl implements GoogleAuthService {
 
         String email = normalizeEmail(jwt.getClaimAsString("email"));
         String sub = jwt.getSubject();
-        Boolean emailVerified = jwt.getClaimAsBoolean("email_verified");
-
-        if (email == null || sub == null || !Boolean.TRUE.equals(emailVerified)) {
-            auditHistoryService.record(
-                    AuditEventType.LOGIN,
-                    AuditOutcome.FAILURE,
-                    null,
-                    email,
-                    request.getDeviceId(),
-                    context != null ? context.getIp() : null,
-                    context != null ? context.getUserAgent() : null,
-                    context != null ? context.getLocation() : null,
-                    "GOOGLE_EMAIL_NOT_VERIFIED"
-            );
-            throw new IllegalArgumentException("Google account email is not verified.");
-        }
-
-        LinkResult result = upsertAndLinkUser(email, sub);
-        User user = result.user();
+        boolean verified = Boolean.TRUE.equals(jwt.getClaimAsBoolean("email_verified"));
 
         String clientId = request.getClientId() != null && !request.getClientId().isBlank()
                 ? request.getClientId().trim()
@@ -87,7 +72,76 @@ public class GoogleAuthServiceImpl implements GoogleAuthService {
                 ? request.getDeviceId().trim()
                 : (context != null ? context.getDeviceId() : null);
 
-        DeviceContext enrichedContext = DeviceContext.builder()
+        DeviceContext merged = mergeGoogleDeviceContext(context, clientId, deviceId);
+        GoogleProfileSnapshot snapshot = GoogleProfileSnapshot.fromJwt(jwt);
+        return loginWithVerifiedGoogleClaims(email, sub, verified, merged, snapshot);
+    }
+
+    @Override
+    @Transactional
+    public LoginResponse loginWithVerifiedGoogleClaims(
+            String email,
+            String sub,
+            boolean emailVerified,
+            DeviceContext context,
+            GoogleProfileSnapshot googleProfile) {
+        email = normalizeEmail(email);
+        if (email == null || sub == null || sub.isBlank()) {
+            auditHistoryService.record(
+                    AuditEventType.LOGIN,
+                    AuditOutcome.FAILURE,
+                    null,
+                    email,
+                    null,
+                    "GOOGLE_EMAIL_NOT_VERIFIED"
+            );
+            throw new IllegalArgumentException("Google account email is not verified.");
+        }
+        if (!emailVerified) {
+            auditHistoryService.record(
+                    AuditEventType.LOGIN,
+                    AuditOutcome.FAILURE,
+                    null,
+                    email,
+                    null,
+                    "GOOGLE_EMAIL_NOT_VERIFIED"
+            );
+            throw new IllegalArgumentException("Google account email is not verified.");
+        }
+
+        LinkResult result = upsertAndLinkUser(email, sub);
+        User user = result.user();
+
+        if (googleProfile != null && googleProfile.hasAny()) {
+            applyGoogleProfile(user.getId(), googleProfile);
+        }
+
+        DeviceContext enrichedContext = mergeGoogleDeviceContext(context, null, null);
+
+        User userForTokens = userRepository.findById(user.getId()).orElse(user);
+        LoginResponse response = authService.issueTokensFor(userForTokens, enrichedContext, true);
+
+        auditHistoryService.record(
+                AuditEventType.LOGIN,
+                AuditOutcome.SUCCESS,
+                user,
+                user.getEmail(),
+                null,
+                result.newlyLinked() ? "GOOGLE_ACCOUNT_LINKED" : "GOOGLE_LOGIN_SUCCESS"
+        );
+
+        return response;
+    }
+
+    private static DeviceContext mergeGoogleDeviceContext(DeviceContext context, String clientIdOverride, String deviceIdOverride) {
+        String clientId = clientIdOverride != null && !clientIdOverride.isBlank()
+                ? clientIdOverride
+                : (context != null ? context.getClientId() : null);
+        String deviceId = deviceIdOverride != null && !deviceIdOverride.isBlank()
+                ? deviceIdOverride
+                : (context != null ? context.getDeviceId() : null);
+
+        return DeviceContext.builder()
                 .clientId(clientId)
                 .deviceId(deviceId)
                 .ip(context != null ? context.getIp() : null)
@@ -98,22 +152,48 @@ public class GoogleAuthServiceImpl implements GoogleAuthService {
                 .deviceType(context != null ? context.getDeviceType() : null)
                 .provider(AuthProvider.GOOGLE)
                 .build();
+    }
 
-        LoginResponse response = authService.issueTokensFor(user, enrichedContext, true);
+    /**
+     * Merges Google-supplied name and avatar into the user's profile (creates profile if missing).
+     */
+    private void applyGoogleProfile(java.util.UUID userId, GoogleProfileSnapshot snap) {
+        if (snap == null || !snap.hasAny()) {
+            return;
+        }
+        User managed = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalStateException("User not found after Google link"));
+        Profile profile = managed.getProfile();
+        if (profile == null) {
+            profile = Profile.builder().user(managed).build();
+            managed.setProfile(profile);
+        }
 
-        auditHistoryService.record(
-                AuditEventType.LOGIN,
-                AuditOutcome.SUCCESS,
-                user,
-                user.getEmail(),
-                response.getDeviceId(),
-                enrichedContext.getIp(),
-                enrichedContext.getUserAgent(),
-                enrichedContext.getLocation(),
-                result.newlyLinked() ? "GOOGLE_ACCOUNT_LINKED" : "GOOGLE_LOGIN_SUCCESS"
-        );
+        String given = snap.givenName();
+        String family = snap.familyName();
+        if (!StringUtils.hasText(given) && !StringUtils.hasText(family) && StringUtils.hasText(snap.fullName())) {
+            String[] parts = snap.fullName().trim().split("\\s+", 2);
+            given = parts[0];
+            family = parts.length > 1 ? parts[1] : null;
+        }
+        if (StringUtils.hasText(given)) {
+            profile.setFirstName(truncate(given, 100));
+        }
+        if (StringUtils.hasText(family)) {
+            profile.setLastName(truncate(family, 100));
+        }
+        if (StringUtils.hasText(snap.pictureUrl())) {
+            profile.setProfilePictureUrl(truncate(snap.pictureUrl(), 2048));
+        }
+        userRepository.save(managed);
+        log.debug("Updated profile from Google for userId={}", userId);
+    }
 
-        return response;
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return null;
+        }
+        return s.length() <= max ? s : s.substring(0, max);
     }
 
     private LinkResult upsertAndLinkUser(String email, String sub) {

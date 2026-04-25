@@ -74,7 +74,7 @@ public class TokenBlacklistConfig {
         }
     }
 
-    /** Check if a token (by JTI or hash fallback) is blacklisted. Fail-open on Redis errors. */
+    /** Check if a token (by JTI or hash fallback) is blacklisted. Fail-closed on Redis errors. */
     public boolean isBlacklisted(@NonNull String token) {
         try {
             if (token.isBlank()) return false;
@@ -93,10 +93,10 @@ public class TokenBlacklistConfig {
             return false;
         } catch (DataAccessException dae) {
             log.warn("Redis unavailable during blacklist check", dae);
-            return false; // fail-open; signature/exp validation still applies
+            return true; // fail-closed: deny token when blacklist cannot be verified
         } catch (Exception ex) {
             log.warn("Unexpected error during blacklist check", ex);
-            return false;
+            return true; // fail-closed: safer default during unknown failures
         }
     }
 
@@ -121,9 +121,9 @@ public class TokenBlacklistConfig {
             long fence = Long.parseLong(v);
             return iatEpochSeconds <= fence;
         } catch (Exception e) {
-            // On errors, fail-open to avoid auth outages; your JWT checks still run
+            // Fail-closed: if revocation fence cannot be checked, deny token use.
             log.warn("Error reading revocation fence", e);
-            return false;
+            return true;
         }
     }
 

@@ -1,6 +1,7 @@
 package com.syncnest.userservice.serviceImpl;
 
 import com.syncnest.userservice.dto.DeviceContext;
+import com.syncnest.userservice.logging.LogSanitizer;
 import com.syncnest.userservice.entity.AuthProvider;
 import com.syncnest.userservice.entity.DeviceMetadata;
 import com.syncnest.userservice.entity.DeviceType;
@@ -10,6 +11,7 @@ import com.syncnest.userservice.repository.UserRepository;
 import com.syncnest.userservice.service.DeviceMetadataService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -45,8 +47,10 @@ public class DeviceMetadataServiceImpl implements DeviceMetadataService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void upsertDeviceLogin(User user, DeviceContext ctx) {
         try {
-            log.debug("Async device metadata upsert started for user={}, ip={}, ua={}", 
-                    user.getEmail(), ctx.getIp(), ctx.getUserAgent());
+            log.debug("Async device metadata upsert started for user={}, ip={}, ua={}",
+                    LogSanitizer.maskEmail(user.getEmail()),
+                    LogSanitizer.maskIp(ctx.getIp()),
+                    LogSanitizer.maskUserAgent(ctx.getUserAgent()));
 
             // Re-fetch user in the new isolated transaction to avoid LazyInit issues
             User managedUser = userRepository.findByIdAndDeletedAtIsNull(user.getId()).orElse(null);
@@ -58,33 +62,63 @@ public class DeviceMetadataServiceImpl implements DeviceMetadataService {
             String location = resolveLocation(ctx.getIp()); // blocking but already async
             String fingerprint = buildFingerprint(ctx);
 
-            deviceMetadataRepository.findByUserAndDeviceId(managedUser, fingerprint)
+            deviceMetadataRepository.findFirstByUserAndDeviceIdOrderByIdAsc(managedUser, fingerprint)
                     .ifPresentOrElse(
                             existing -> updateExisting(existing, ctx, location),
                             () -> insertNew(managedUser, ctx, fingerprint, location)
                     );
         } catch (Exception ex) {
             // Never block the auth flow due to device tracking failure
-            log.warn("Failed to upsert device metadata for user={}: {}", user.getEmail(), ex.getMessage(), ex);
+            log.warn("Failed to upsert device metadata for user={}: {}",
+                    LogSanitizer.maskEmail(user.getEmail()), ex.getMessage(), ex);
+        }
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public DeviceMetadata upsertAndReturn(User user, DeviceContext ctx) {
+        try {
+            User managedUser = userRepository.findByIdAndDeletedAtIsNull(user.getId()).orElse(null);
+            if (managedUser == null) {
+                log.warn("upsertAndReturn: user not found id={}", user.getId());
+                return null;
+            }
+
+            // Keep login API fast: avoid remote geo-IP call on the synchronous path.
+            // Async upsert path can still resolve detailed location in background.
+            String location = fastLocationForRequest(ctx.getIp());
+            String fingerprint = buildFingerprint(ctx);
+
+            return deviceMetadataRepository.findFirstByUserAndDeviceIdOrderByIdAsc(managedUser, fingerprint)
+                    .map(existing -> {
+                        updateExisting(existing, ctx, location);
+                        return existing;
+                    })
+                    .orElseGet(() -> insertNewAndReturn(managedUser, ctx, fingerprint, location));
+        } catch (Exception ex) {
+            log.warn("Failed to upsert device metadata (sync) for user={}: {}",
+                    LogSanitizer.maskEmail(user.getEmail()), ex.getMessage(), ex);
+            return null;
         }
     }
 
     // ...existing code...
 
     private void updateExisting(DeviceMetadata device, DeviceContext ctx, String location) {
-        log.debug("Updating existing device metadata: deviceId={}, newIp={}, newLocation={}", 
-                device.getDeviceId(), ctx.getIp(), location);
+        log.debug("Updating existing device metadata: deviceId={}, newIp={}, newLocation={}",
+                device.getDeviceId(), LogSanitizer.maskIp(ctx.getIp()), location);
         device.setIpAddress(ctx.getIp());
         device.setLocation(location);
         device.setLastLoginAt(LocalDateTime.now());
         // Re-save updated device info (OS/browser/UA generally don't change for the same device)
         deviceMetadataRepository.save(device);
-        log.info("Updated device metadata id={}, user={}", device.getId(), device.getUser().getEmail());
+        log.info("Updated device metadata id={}, user={}",
+                device.getId(), LogSanitizer.maskEmail(device.getUser().getEmail()));
     }
 
     private void insertNew(User user, DeviceContext ctx, String fingerprint, String location) {
-        log.debug("Inserting new device metadata for user={}, fingerprint={}, os={}, browser={}", 
-                user.getEmail(), fingerprint, ctx.getOs(), ctx.getBrowser());
+        log.debug("Inserting new device metadata for user={}, fingerprint={}, os={}, browser={}",
+                LogSanitizer.maskEmail(user.getEmail()), fingerprint, ctx.getOs(), ctx.getBrowser());
 
         DeviceMetadata device = DeviceMetadata.builder()
                 .user(user)
@@ -99,9 +133,51 @@ public class DeviceMetadataServiceImpl implements DeviceMetadataService {
                 .firstSeenAt(LocalDateTime.now())
                 .lastLoginAt(LocalDateTime.now())
                 .build();
-        deviceMetadataRepository.save(device);
-        log.info("Registered new device for user={} fingerprint={} os={} browser={} location={}",
-                user.getEmail(), fingerprint, ctx.getOs(), ctx.getBrowser(), location);
+        try {
+            deviceMetadataRepository.save(device);
+            log.info("Registered new device for user={} fingerprint={} os={} browser={} location={}",
+                    LogSanitizer.maskEmail(user.getEmail()), fingerprint, ctx.getOs(), ctx.getBrowser(), location);
+        } catch (DataIntegrityViolationException ex) {
+            // Unique key race (user_id + device_id): another transaction inserted first.
+            log.debug("Concurrent device upsert detected for user={}, fingerprint={}",
+                    LogSanitizer.maskEmail(user.getEmail()), fingerprint);
+            deviceMetadataRepository.findFirstByUserAndDeviceIdOrderByIdAsc(user, fingerprint)
+                    .ifPresent(existing -> updateExisting(existing, ctx, location));
+        }
+    }
+
+    private DeviceMetadata insertNewAndReturn(User user, DeviceContext ctx, String fingerprint, String location) {
+        log.debug("Inserting new device metadata (sync) for user={}, fingerprint={}, os={}, browser={}",
+                LogSanitizer.maskEmail(user.getEmail()), fingerprint, ctx.getOs(), ctx.getBrowser());
+
+        DeviceMetadata device = DeviceMetadata.builder()
+                .user(user)
+                .deviceId(fingerprint)
+                .ipAddress(ctx.getIp())
+                .userAgent(ctx.getUserAgent())
+                .os(ctx.getOs())
+                .browser(ctx.getBrowser())
+                .deviceType(ctx.getDeviceType() != null ? ctx.getDeviceType() : DeviceType.UNKNOWN)
+                .provider(ctx.getProvider() != null ? ctx.getProvider() : AuthProvider.LOCAL)
+                .location(location)
+                .firstSeenAt(LocalDateTime.now())
+                .lastLoginAt(LocalDateTime.now())
+                .build();
+        try {
+            DeviceMetadata saved = deviceMetadataRepository.save(device);
+            log.info("Registered new device (sync) for user={} fingerprint={} os={} browser={} location={}",
+                    LogSanitizer.maskEmail(user.getEmail()), fingerprint, ctx.getOs(), ctx.getBrowser(), location);
+            return saved;
+        } catch (DataIntegrityViolationException ex) {
+            log.debug("Concurrent sync device upsert detected for user={}, fingerprint={}",
+                    LogSanitizer.maskEmail(user.getEmail()), fingerprint);
+            return deviceMetadataRepository.findFirstByUserAndDeviceIdOrderByIdAsc(user, fingerprint)
+                    .map(existing -> {
+                        updateExisting(existing, ctx, location);
+                        return existing;
+                    })
+                    .orElseThrow(() -> ex);
+        }
     }
 
     /**
@@ -111,11 +187,11 @@ public class DeviceMetadataServiceImpl implements DeviceMetadataService {
      */
     private String resolveLocation(String ip) {
         if (ip == null || ip.isBlank() || isPrivateIp(ip)) {
-            log.debug("Location resolution skipped for IP: {} (private or null)", ip);
+            log.debug("Location resolution skipped for IP: {} (private or null)", LogSanitizer.maskIp(ip));
             return "Local Network";
         }
         try {
-            log.debug("Resolving location for IP: {}", ip);
+            log.debug("Resolving location for IP: {}", LogSanitizer.maskIp(ip));
             String url = "http://ip-api.com/json/" + ip + "?fields=status,country,regionName,city";
             HttpRequest req = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -131,11 +207,11 @@ public class DeviceMetadataServiceImpl implements DeviceMetadataService {
                         .filter(s -> !s.isBlank())
                         .collect(Collectors.joining(", "));
                 String result = location.isBlank() ? "Unknown" : location;
-                log.debug("Location resolved for IP: {} -> {}", ip, result);
+                log.debug("Location resolved for IP: {} -> {}", LogSanitizer.maskIp(ip), result);
                 return result;
             }
         } catch (Exception ex) {
-            log.warn("Geo lookup failed for ip={}: {}", ip, ex.getMessage());
+            log.warn("Geo lookup failed for ip={}: {}", LogSanitizer.maskIp(ip), ex.getMessage());
         }
         return "Unknown";
     }
@@ -188,6 +264,16 @@ public class DeviceMetadataServiceImpl implements DeviceMetadataService {
 
     private String nvl(String s) {
         return s == null ? "" : s;
+    }
+
+    /**
+     * Low-latency location fallback for request path; avoids blocking on external HTTP.
+     */
+    private String fastLocationForRequest(String ip) {
+        if (ip == null || ip.isBlank() || isPrivateIp(ip)) {
+            return "Local Network";
+        }
+        return "Unknown";
     }
 }
 

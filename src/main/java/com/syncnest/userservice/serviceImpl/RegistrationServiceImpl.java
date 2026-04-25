@@ -6,6 +6,7 @@ import com.syncnest.userservice.dto.RegistrationResponse;
 import com.syncnest.userservice.entity.AuditEventType;
 import com.syncnest.userservice.entity.AuditOutcome;
 import com.syncnest.userservice.entity.Profile;
+import com.syncnest.userservice.entity.RegistrationStatus;
 import com.syncnest.userservice.entity.User;
 import com.syncnest.userservice.entity.UserRole;
 import com.syncnest.userservice.exception.UserExceptions;
@@ -19,6 +20,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Locale;
+import java.util.Optional;
+
+import static com.syncnest.userservice.logging.LogSanitizer.maskEmail;
 
 @Slf4j
 @Service
@@ -42,11 +46,6 @@ public class RegistrationServiceImpl implements RegistrationService {
             throw new IllegalArgumentException("Email must be provided.");
         }
 
-        if (userRepository.existsByEmailAndDeletedAtIsNull(email)) {
-            log.warn("Registration rejected: active user already exists with email={}", maskEmail(email));
-            throw new UserExceptions.UserAlreadyExists(email);
-        }
-
         User restoredUser = userRepository.findDeletedByEmail(email)
                 .map(deleted -> restoreSoftDeletedUser(deleted, request))
                 .orElse(null);
@@ -59,26 +58,38 @@ public class RegistrationServiceImpl implements RegistrationService {
             log.info("Soft-deleted user restored in-place during registration: email={}, userId={}",
                     maskEmail(saved.getEmail()), saved.getId());
         } else {
-            log.debug("Building new user entity for email: {}", maskEmail(email));
-            User user = User.builder()
-                    .email(email)
-                    .password(passwordEncoder.encode(request.getPassword()))
-                    .role(UserRole.ROLE_USER)
-                    .isLocked(true)
-                    .isVerified(false)
-                    .enabled(false)
-                    .build();
+            Optional<User> activeOpt = userRepository.findByEmailAndDeletedAtIsNull(email);
+            if (activeOpt.isPresent()) {
+                User existing = activeOpt.get();
+                if (existing.isVerified()) {
+                    log.warn("Registration rejected: verified user already exists with email={}", maskEmail(email));
+                    throw new UserExceptions.UserAlreadyExists(email);
+                }
+                saved = resumePendingRegistration(existing, request);
+                message = "Signup updated. A new verification code was sent to your email.";
+                log.info("Resumed pending registration for email={}, userId={}", maskEmail(saved.getEmail()), saved.getId());
+            } else {
+                log.debug("Building new user entity for email: {}", maskEmail(email));
+                User user = User.builder()
+                        .email(email)
+                        .password(passwordEncoder.encode(request.getPassword()))
+                        .role(UserRole.ROLE_USER)
+                        .isLocked(true)
+                        .isVerified(false)
+                        .enabled(false)
+                        .build();
 
-            Profile profile = Profile.builder()
-                    .firstName(request.getFirstName())
-                    .lastName(request.getLastName())
-                    .user(user)
-                    .build();
-            user.setProfile(profile);
+                Profile profile = Profile.builder()
+                        .firstName(request.getFirstName())
+                        .lastName(request.getLastName())
+                        .user(user)
+                        .build();
+                user.setProfile(profile);
 
-            saved = userRepository.save(user);
-            message = "User registered successfully. OTP sent to email.";
-            log.info("User registered successfully: email={}, userId={}", maskEmail(saved.getEmail()), saved.getId());
+                saved = userRepository.save(user);
+                message = "User registered successfully. OTP sent to email.";
+                log.info("User registered successfully: email={}, userId={}", maskEmail(saved.getEmail()), saved.getId());
+            }
         }
 
         auditHistoryService.record(
@@ -86,10 +97,7 @@ public class RegistrationServiceImpl implements RegistrationService {
                 AuditOutcome.SUCCESS,
                 saved,
                 saved.getEmail(),
-                null,
-                null,
-                null,
-                null,
+                RegistrationStatus.INITIATED,
                 "USER_REGISTERED"
         );
 
@@ -104,6 +112,26 @@ public class RegistrationServiceImpl implements RegistrationService {
                 .email(saved.getEmail())
                 .otpMeta(otpMeta)
                 .build();
+    }
+
+    /**
+     * User exists but never completed email verification — refresh password/profile and allow a new OTP flow.
+     */
+    private User resumePendingRegistration(User user, RegistrationRequest request) {
+        user.setPassword(passwordEncoder.encode(request.getPassword()));
+        user.setLocked(true);
+        user.setEnabled(false);
+        user.setVerified(false);
+
+        Profile profile = user.getProfile();
+        if (profile == null) {
+            profile = Profile.builder().user(user).build();
+            user.setProfile(profile);
+        }
+        profile.setFirstName(request.getFirstName());
+        profile.setLastName(request.getLastName());
+
+        return userRepository.save(user);
     }
 
     private User restoreSoftDeletedUser(User deletedUser, RegistrationRequest request) {
@@ -125,12 +153,5 @@ public class RegistrationServiceImpl implements RegistrationService {
         profile.setLastName(request.getLastName());
 
         return userRepository.save(deletedUser);
-    }
-
-    private String maskEmail(String email) {
-        if (email == null || email.length() < 3) return "***";
-        int atIndex = email.indexOf('@');
-        if (atIndex <= 1) return "***@***";
-        return email.charAt(0) + "***" + email.substring(atIndex);
     }
 }

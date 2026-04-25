@@ -81,44 +81,38 @@
         </rollingPolicy>
     </appender>
 
-    <!-- Logger for Auth Services -->
-    <logger name="com.syncnest.userservice.serviceImpl.AuthServiceImpl" level="DEBUG" additivity="false">
+    <!-- Auth / token paths: INFO by default (override with logging.level.* in application-*.properties for local DEBUG). -->
+    <logger name="com.syncnest.userservice.serviceImpl.AuthServiceImpl" level="INFO" additivity="false">
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="AUTH_FILE"/>
     </logger>
 
-    <!-- Logger for OTP Services -->
-    <logger name="com.syncnest.userservice.serviceImpl.OtpServiceImpl" level="DEBUG" additivity="false">
+    <logger name="com.syncnest.userservice.serviceImpl.OtpServiceImpl" level="INFO" additivity="false">
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="AUTH_FILE"/>
     </logger>
 
-    <!-- Logger for Refresh Token Services -->
-    <logger name="com.syncnest.userservice.serviceImpl.RefreshTokenServiceImpl" level="DEBUG" additivity="false">
+    <logger name="com.syncnest.userservice.serviceImpl.RefreshTokenServiceImpl" level="INFO" additivity="false">
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="AUTH_FILE"/>
     </logger>
 
-    <!-- Logger for Audit History Services -->
-    <logger name="com.syncnest.userservice.serviceImpl.AuditHistoryServiceImpl" level="DEBUG" additivity="false">
+    <logger name="com.syncnest.userservice.serviceImpl.AuditHistoryServiceImpl" level="INFO" additivity="false">
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="AUDIT_FILE"/>
     </logger>
 
-    <!-- Logger for Device Metadata Services -->
-    <logger name="com.syncnest.userservice.serviceImpl.DeviceMetadataServiceImpl" level="DEBUG" additivity="false">
+    <logger name="com.syncnest.userservice.serviceImpl.DeviceMetadataServiceImpl" level="INFO" additivity="false">
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="AUDIT_FILE"/>
     </logger>
 
-    <!-- Logger for Controllers -->
-    <logger name="com.syncnest.userservice.controller" level="DEBUG">
+    <logger name="com.syncnest.userservice.controller" level="INFO">
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="FILE"/>
     </logger>
 
-    <!-- Logger for Bootstrap -->
-    <logger name="com.syncnest.userservice.bootstrap" level="DEBUG">
+    <logger name="com.syncnest.userservice.bootstrap" level="INFO">
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="FILE"/>
     </logger>

@@ -1,5 +1,6 @@
 package com.syncnest.userservice.exception;
 
+import com.syncnest.userservice.logging.LogSanitizer;
 import org.springframework.http.HttpStatus;
 
 /**
@@ -34,7 +35,7 @@ public final class UserExceptions {
                     "https://syncnest.dev/problems/user-already-exists",
                     "User Already Exists",
                     ErrorCode.USER_002,
-                    "An account with email '" + maskEmail(email) + "' already exists.");
+                    "An account with email '" + LogSanitizer.maskEmail(email) + "' already exists.");
         }
     }
 
@@ -112,10 +113,4 @@ public final class UserExceptions {
         }
     }
 
-    private static String maskEmail(String email) {
-        if (email == null || email.length() < 3) return "***";
-        int atIndex = email.indexOf('@');
-        if (atIndex <= 1) return "***@***";
-        return email.charAt(0) + "***" + email.substring(atIndex);
-    }
 }

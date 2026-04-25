@@ -1,7 +1,11 @@
 package com.syncnest.userservice.controller;
 
+import com.syncnest.userservice.SecurityConfig.JwtTokenProviderConfig;
+import com.syncnest.userservice.SecurityConfig.TokenBlacklistConfig;
 import com.syncnest.userservice.dto.*;
 import com.syncnest.userservice.entity.AuthProvider;
+import com.syncnest.userservice.entity.User;
+import com.syncnest.userservice.oauth2.OAuth2ExchangeOttService;
 import com.syncnest.userservice.repository.UserRepository;
 import com.syncnest.userservice.service.AuthService;
 import com.syncnest.userservice.service.OtpService;
@@ -9,22 +13,31 @@ import com.syncnest.userservice.service.PasswordResetService;
 import com.syncnest.userservice.service.RefreshTokenService;
 import com.syncnest.userservice.service.RegistrationService;
 import com.syncnest.userservice.service.UserAccountService;
+import com.syncnest.userservice.service.UserSummaryMapper;
 import com.syncnest.userservice.utils.RequestMetadataExtractor;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.UUID;
+
+import static com.syncnest.userservice.logging.LogSanitizer.maskEmail;
+import static com.syncnest.userservice.logging.LogSanitizer.maskIp;
+import static com.syncnest.userservice.logging.LogSanitizer.maskUserAgent;
 
 @Slf4j
 @RestController
@@ -34,6 +47,14 @@ public class AuthController {
 
     private static final String NEXT_SECURED_PATH = "/dashboard";
 
+    /** Set to true in production (HTTPS) so refresh tokens are never sent over clear HTTP. */
+    @Value("${app.cookie.secure:false}")
+    private boolean refreshCookieSecure;
+
+    /** Cookie max-age on login/verify must match server-side refresh lifetime (see RefreshTokenServiceImpl). */
+    @Value("${refresh-token.expiration.milliseconds:2592000000}")
+    private long refreshTokenExpirationMs;
+
     private final AuthService authService;
     private final RefreshTokenService refreshTokenService;
     private final UserRepository userRepository;
@@ -42,6 +63,10 @@ public class AuthController {
     private final PasswordResetService passwordResetService;
     private final UserAccountService userAccountService;
     private final RequestMetadataExtractor metadataExtractor;
+    private final JwtTokenProviderConfig jwtTokenProvider;
+    private final TokenBlacklistConfig tokenBlacklistConfig;
+    private final OAuth2ExchangeOttService oauth2ExchangeOttService;
+    private final UserSummaryMapper userSummaryMapper;
 
     @GetMapping("/ping")
     public String ping() {
@@ -53,9 +78,9 @@ public class AuthController {
             @Valid @RequestBody LoginRequest request,
             HttpServletRequest httpRequest) {
 
-        log.debug("Login request received from IP: {}, UserAgent: {}", 
-                metadataExtractor.extractIp(httpRequest),
-                metadataExtractor.extractUserAgent(httpRequest));
+        log.debug("Login request received from IP: {}, UserAgent: {}",
+                maskIp(metadataExtractor.extractIp(httpRequest)),
+                maskUserAgent(metadataExtractor.extractUserAgent(httpRequest)));
 
         // Always override IP and User-Agent from real HTTP headers — never trust the request body
         request.setIp(metadataExtractor.extractIp(httpRequest));
@@ -66,10 +91,10 @@ public class AuthController {
 
         ResponseCookie rtCookie = ResponseCookie.from("refreshToken", response.getRefreshToken())
                 .httpOnly(true)
-                .secure(false)   // set true in production (HTTPS)
+                .secure(refreshCookieSecure)
                 .sameSite("Strict")
                 .path("/")
-                .maxAge(Duration.ofDays(30))
+                .maxAge(Duration.ofMillis(refreshTokenExpirationMs))
                 .build();
         response.setRefreshToken(null);
 
@@ -79,13 +104,49 @@ public class AuthController {
                 .body(response);
     }
 
+    /**
+     * Exchanges a one-time ticket from the browser Google OAuth redirect for a fresh access JWT.
+     * The refresh token remains in the HttpOnly cookie set during the OAuth callback.
+     */
+    @PostMapping("/oauth2/exchange")
+    public ResponseEntity<OAuth2ExchangeResponse> oauth2Exchange(@Valid @RequestBody OAuth2ExchangeRequest request) {
+        UUID userId = oauth2ExchangeOttService.consume(request.getOtt());
+        if (userId == null) {
+            throw new BadCredentialsException("Invalid or expired exchange ticket");
+        }
+        User user = userRepository.findByIdAndDeletedAtIsNull(userId)
+                .orElseThrow(() -> new BadCredentialsException("Invalid or expired exchange ticket"));
+        if (!user.isEnabled() || user.isLocked()) {
+            throw new BadCredentialsException("Account is not available");
+        }
+        String accessToken = jwtTokenProvider.generateToken(user.getEmail());
+        long expiresIn = jwtTokenProvider.getTokenValiditySeconds();
+        OAuth2ExchangeResponse body = OAuth2ExchangeResponse.builder()
+                .accessToken(accessToken)
+                .expiresIn(expiresIn)
+                .user(userSummaryMapper.toSummary(user))
+                .build();
+        return ResponseEntity.ok(body);
+    }
+
     @PostMapping("/refreshToken")
     public ResponseEntity<RefreshTokenResponse> refresh(
-            @Valid @RequestBody RefreshTokenRequest request) {
+            @RequestBody(required = false) RefreshTokenRequest request,
+            HttpServletRequest httpRequest) {
 
-        log.debug("Refresh token request received, deviceId: {}", request.getDeviceId());
+        String cookieToken = jwtTokenProvider.resolveRefreshTokenCookie(httpRequest).orElse(null);
+        String bodyToken = request != null ? request.getRefreshToken() : null;
+        String resolvedToken = (cookieToken != null && !cookieToken.isBlank()) ? cookieToken : bodyToken;
+        String deviceId = request != null ? request.getDeviceId() : null;
 
-        RefreshTokenResponse response = refreshTokenService.validateAndRotate(request);
+        String source = (cookieToken != null && !cookieToken.isBlank()) ? "cookie" : "body";
+        log.debug("Refresh token request received, deviceId={}, tokenSource={}", deviceId, source);
+
+        RefreshTokenRequest effective = new RefreshTokenRequest();
+        effective.setRefreshToken(resolvedToken);
+        effective.setDeviceId(deviceId);
+
+        RefreshTokenResponse response = refreshTokenService.validateAndRotate(effective);
 
         long maxAge = 0;
         if (response.getExpiresAt() != null) {
@@ -95,7 +156,7 @@ public class AuthController {
 
         ResponseCookie rtCookie = ResponseCookie.from("refreshToken", response.getRefreshToken())
                 .httpOnly(true)
-                .secure(false)
+                .secure(refreshCookieSecure)
                 .sameSite("Strict")
                 .path("/")
                 .maxAge(Duration.ofSeconds(maxAge))
@@ -127,6 +188,8 @@ public class AuthController {
                 .resendIntervalLock(status.resendIntervalLock())
                 .resendIntervalSeconds(status.resendIntervalSeconds())
                 .cooldownSeconds(status.cooldownSeconds())
+                .otpSecondsRemaining(status.otpSecondsRemaining())
+                .resendLockSecondsRemaining(status.resendLockSecondsRemaining())
                 .build();
 
         RegistrationResponse body = RegistrationResponse.builder()
@@ -140,6 +203,22 @@ public class AuthController {
         HttpHeaders headers = new HttpHeaders();
         headers.set(HttpHeaders.LOCATION, "/api/v1/auth/verify-otp");
         return new ResponseEntity<>(body, headers, HttpStatus.CREATED);
+    }
+
+    @PostMapping("/resend-otp")
+    public ResponseEntity<ResendOtpResponse> resendOtp(
+            @Valid @RequestBody ResendOtpRequest request) {
+
+        log.debug("OTP resend request received for email: {}", maskEmail(request.getEmail()));
+
+        ResendOtpResponse response = otpService.resendOtp(request.getEmail());
+
+        log.info("OTP resend completed for email: {}, used: {}/{}",
+                maskEmail(request.getEmail()),
+                response.getOtpMeta().getUsed(),
+                response.getOtpMeta().getMax());
+
+        return ResponseEntity.ok(response);
     }
 
     @PostMapping("/verify-otp")
@@ -166,10 +245,10 @@ public class AuthController {
 
         ResponseCookie rtCookie = ResponseCookie.from("refreshToken", response.getRefreshToken())
                 .httpOnly(true)
-                .secure(false)
+                .secure(refreshCookieSecure)
                 .sameSite("Strict")
                 .path("/")
-                .maxAge(Duration.ofDays(30))
+                .maxAge(Duration.ofMillis(refreshTokenExpirationMs))
                 .build();
 
         response.setRefreshToken(null);
@@ -182,27 +261,62 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ResponseEntity<LogoutResponse> logout(@Valid @RequestBody LogoutRequest request) {
+    public ResponseEntity<LogoutResponse> logout(
+            @Valid @RequestBody LogoutRequest request,
+            HttpServletRequest httpRequest) {
+
+        // Invalidate the presented access token so it cannot be used until natural expiry
+        String authHeader = httpRequest.getHeader(HttpHeaders.AUTHORIZATION);
+        if (StringUtils.hasText(authHeader) && authHeader.startsWith("Bearer ")) {
+            String access = authHeader.substring(7).trim();
+            if (!access.isEmpty()) {
+                tokenBlacklistConfig.addToBlacklist(access);
+            }
+        }
+
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         String email = (auth != null) ? auth.getName() : null;
 
-        log.debug("Logout request received from authenticated user: {}", maskEmail(email));
+        log.debug("Logout request: principalEmail={} (Bearer may be absent for cookie-only clients)", maskEmail(email));
 
-        if (email != null) {
-            userRepository.findByEmailAndDeletedAtIsNull(email).ifPresent(user -> {
-                if (request.getDeviceId() != null && !request.getDeviceId().isBlank()) {
-                    refreshTokenService.revokeAllForUserDevice(user, request.getDeviceId());
-                    log.info("Revoked refresh tokens for user={} deviceId={}", maskEmail(email), request.getDeviceId());
-                } else {
-                    refreshTokenService.revokeAllForUser(user);
-                    log.info("Revoked all refresh tokens for user={}", maskEmail(email));
-                }
-            });
+        User user = (email != null) ? userRepository.findByEmailAndDeletedAtIsNull(email).orElse(null) : null;
+        if (user == null) {
+            String raw = request.getRefreshToken();
+            if (!StringUtils.hasText(raw)) {
+                raw = jwtTokenProvider.resolveRefreshTokenCookie(httpRequest).orElse(null);
+            }
+            if (StringUtils.hasText(raw)) {
+                user = refreshTokenService.findUserByRawRefreshToken(raw).orElse(null);
+            }
+        }
+
+        if (user != null) {
+            String uemail = user.getEmail();
+            String iss = jwtTokenProvider.getConfiguredIssuer();
+            long nowSec = java.time.Instant.now().getEpochSecond();
+            long fenceTtlSec = (long) jwtTokenProvider.getTokenValiditySeconds() + 120L;
+            tokenBlacklistConfig.setRevocationFence(iss, uemail, nowSec, fenceTtlSec);
+
+            if (request.getDeviceId() != null && !request.getDeviceId().isBlank()) {
+                refreshTokenService.revokeAllForUserDevice(user, request.getDeviceId());
+                log.info("Revoked refresh tokens for user={} deviceId={}", maskEmail(uemail), request.getDeviceId());
+            } else {
+                refreshTokenService.revokeAllForUser(user);
+                log.info("Revoked all refresh tokens for user={}", maskEmail(uemail));
+            }
+        } else if (StringUtils.hasText(email)) {
+            // Valid JWT in context but no DB user (e.g. deleted) — still fence by subject
+            String iss = jwtTokenProvider.getConfiguredIssuer();
+            long nowSec = java.time.Instant.now().getEpochSecond();
+            long fenceTtlSec = (long) jwtTokenProvider.getTokenValiditySeconds() + 120L;
+            tokenBlacklistConfig.setRevocationFence(iss, email, nowSec, fenceTtlSec);
+        } else {
+            log.debug("Logout: could not resolve user (no valid JWT + no refresh) — only cookie clear / optional blacklist");
         }
 
         ResponseCookie clear = ResponseCookie.from("refreshToken", "")
                 .httpOnly(true)
-                .secure(false)
+                .secure(refreshCookieSecure)
                 .sameSite("Strict")
                 .path("/")
                 .maxAge(Duration.ZERO)
@@ -212,7 +326,8 @@ public class AuthController {
         body.setSuccess(true);
         body.setMessage("Logged out");
 
-        log.info("Logout successful for user: {}", maskEmail(email));
+        String loggedEmail = (user != null) ? user.getEmail() : email;
+        log.info("Logout response sent for: {}", maskEmail(loggedEmail));
         return ResponseEntity.ok()
                 .header(HttpHeaders.SET_COOKIE, clear.toString())
                 .body(body);
@@ -270,12 +385,5 @@ public class AuthController {
 
         log.info("Account restoration completed for email={}", maskEmail(request.getEmail()));
         return ResponseEntity.ok(response);
-    }
-
-    private String maskEmail(String email) {
-        if (email == null || email.length() < 3) return "***";
-        int atIndex = email.indexOf('@');
-        if (atIndex <= 1) return "***@***";
-        return email.charAt(0) + "***" + email.substring(atIndex);
     }
 }

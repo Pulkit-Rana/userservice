@@ -6,5 +6,9 @@ public record OtpStatus(
         int used,
         int max,
         int resendIntervalSeconds,
-        int cooldownSeconds
+        int cooldownSeconds,
+        /** Seconds left until the current OTP expires (0 if none). */
+        int otpSecondsRemaining,
+        /** Seconds left on the resend rate-limit lock (0 if none). */
+        int resendLockSecondsRemaining
 ) {}

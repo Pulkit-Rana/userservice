@@ -19,6 +19,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
+import static com.syncnest.userservice.logging.LogSanitizer.maskEmail;
+
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -62,6 +64,16 @@ public class JwtAuthFilterConfig extends OncePerRequestFilter {
                 return;
             }
 
+            // 3b) Reject still-valid access tokens issued at/before a server-side "logout" fence (e.g. cookie-only logout)
+            if (blacklistService.isBeforeFence(
+                    jwtService.extractIssOrEmpty(token),
+                    email,
+                    jwtService.extractIssuedAtEpochSeconds(token))) {
+                log.warn("JWT rejected by post-logout fence (iat) for {} {} {}", request.getMethod(), path, maskEmail(email));
+                filterChain.doFilter(request, response);
+                return;
+            }
+
             log.debug("JWT email extracted: {}", maskEmail(email));
 
             // 4) Only authenticate if context is empty
@@ -97,12 +109,5 @@ public class JwtAuthFilterConfig extends OncePerRequestFilter {
 
         // 6) Continue filter chain
         filterChain.doFilter(request, response);
-    }
-
-    private String maskEmail(String email) {
-        if (email == null || email.length() < 3) return "***";
-        int atIndex = email.indexOf('@');
-        if (atIndex <= 1) return "***@***";
-        return email.charAt(0) + "***" + email.substring(atIndex);
     }
 }

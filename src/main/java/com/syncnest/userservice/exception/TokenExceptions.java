@@ -146,5 +146,16 @@ public final class TokenExceptions {
                     detail != null ? detail : "Token is bound to different session/device");
         }
     }
+
+    /** 401 Unauthorized – Replay attack detected: a revoked refresh token was reused. */
+    public static final class ReplayAttackDetected extends ApiException {
+        public ReplayAttackDetected(String detail) {
+            super(HttpStatus.UNAUTHORIZED,
+                    "https://syncnest.dev/problems/replay-attack-detected",
+                    "Replay Attack Detected",
+                    ErrorCode.TOKEN_011,
+                    detail != null ? detail : ErrorCode.TOKEN_011.getMessage());
+        }
+    }
 }
 

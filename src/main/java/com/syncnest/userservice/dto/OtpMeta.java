@@ -13,4 +13,8 @@ public class OtpMeta {
     private boolean resendIntervalLock;  // true if 1-min lock is active
     private int resendIntervalSeconds;   // 60 (info for client)
     private int cooldownSeconds;         // 300 (info for client)
+    /** Seconds until current OTP expires (from Redis TTL); 0 if no active code. */
+    private Integer otpSecondsRemaining;
+    /** Seconds until "Resend" is allowed again; 0 if not locked. */
+    private Integer resendLockSecondsRemaining;
 }

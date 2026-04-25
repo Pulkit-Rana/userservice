@@ -65,7 +65,6 @@ class RegistrationServiceImplTest {
                 .lastName("Name")
                 .build());
 
-        when(userRepository.existsByEmailAndDeletedAtIsNull("user@example.com")).thenReturn(false);
         when(userRepository.findDeletedByEmail("user@example.com")).thenReturn(Optional.of(deletedUser));
         when(passwordEncoder.encode("Password@123")).thenReturn("encoded-password");
         when(userRepository.save(any(User.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -86,5 +85,39 @@ class RegistrationServiceImplTest {
         assertThat(saved.getProfile().getLastName()).isEqualTo("User");
         assertThat(response.getEmail()).isEqualTo("user@example.com");
         assertThat(response.getMessage()).contains("restored");
+    }
+
+    @Test
+    void registerUser_shouldResumePendingUnverifiedUser() {
+        RegistrationRequest request = RegistrationRequest.builder()
+                .email("pending@example.com")
+                .password("NewPassword@1")
+                .passwordConfirmation("NewPassword@1")
+                .firstName("Pat")
+                .lastName("Lee")
+                .build();
+
+        User pending = User.builder()
+                .email("pending@example.com")
+                .password("old-hash")
+                .enabled(false)
+                .isLocked(true)
+                .isVerified(false)
+                .build();
+        pending.setProfile(Profile.builder().user(pending).firstName("X").lastName("Y").build());
+
+        when(userRepository.findDeletedByEmail("pending@example.com")).thenReturn(Optional.empty());
+        when(userRepository.findByEmailAndDeletedAtIsNull("pending@example.com")).thenReturn(Optional.of(pending));
+        when(passwordEncoder.encode("NewPassword@1")).thenReturn("new-encoded");
+        when(userRepository.save(any(User.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        RegistrationResponse response = service.registerUser(request);
+
+        assertThat(response.getEmail()).isEqualTo("pending@example.com");
+        assertThat(response.getMessage()).containsIgnoringCase("updated");
+        assertThat(pending.getPassword()).isEqualTo("new-encoded");
+        assertThat(pending.isVerified()).isFalse();
+        assertThat(pending.getProfile().getFirstName()).isEqualTo("Pat");
+        assertThat(pending.getProfile().getLastName()).isEqualTo("Lee");
     }
 }

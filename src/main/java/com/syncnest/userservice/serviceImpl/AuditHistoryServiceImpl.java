@@ -1,9 +1,12 @@
 package com.syncnest.userservice.serviceImpl;
 
 import com.syncnest.userservice.dto.AuditHistoryResponse;
+import com.syncnest.userservice.logging.LogSanitizer;
 import com.syncnest.userservice.entity.AuditEventType;
 import com.syncnest.userservice.entity.AuditHistory;
 import com.syncnest.userservice.entity.AuditOutcome;
+import com.syncnest.userservice.entity.DeviceMetadata;
+import com.syncnest.userservice.entity.RegistrationStatus;
 import com.syncnest.userservice.entity.User;
 import com.syncnest.userservice.repository.AuditHistoryRepository;
 import com.syncnest.userservice.service.AuditHistoryService;
@@ -42,22 +45,30 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
             AuditOutcome outcome,
             User user,
             String userEmail,
-            String deviceId,
-            String ipAddress,
-            String userAgent,
-            String location,
+            RegistrationStatus registrationStatus,
             String details
+    ) {
+        record(eventType, outcome, user, userEmail, registrationStatus, details, null);
+    }
+
+    @Override
+    public void record(
+            AuditEventType eventType,
+            AuditOutcome outcome,
+            User user,
+            String userEmail,
+            RegistrationStatus registrationStatus,
+            String details,
+            DeviceMetadata deviceMetadata
     ) {
         AuditWriteRequest request = new AuditWriteRequest(
                 eventType,
                 outcome,
                 user != null ? user.getId() : null,
                 normalizeEmail(userEmail),
-                trimToLength(deviceId, 64),
-                trimToLength(ipAddress, 45),
-                trimToLength(userAgent, 255),
-                trimToLength(location, 255),
-                trimToLength(details, 500)
+                registrationStatus,
+                trimToLength(details, 500),
+                deviceMetadata != null ? deviceMetadata.getId() : null
         );
 
         try {
@@ -76,7 +87,8 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
             persistSafely(request);
         } catch (Exception ex) {
             // Audit must never break auth flows.
-            log.warn("Failed to persist audit history eventType={} userEmail={}", eventType, userEmail, ex);
+            log.warn("Failed to persist audit history eventType={} userEmail={}",
+                    eventType, LogSanitizer.maskEmail(userEmail), ex);
         }
     }
 
@@ -92,17 +104,19 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
     ) {
         return auditHistoryRepository
                 .findHistoryForUser(normalizeEmail(userEmail), eventType, outcome, fromTime, toTime, pageable)
-                .map(entry -> AuditHistoryResponse.builder()
-                        .eventType(entry.getEventType())
-                        .outcome(entry.getOutcome())
-                        .userEmail(entry.getUserEmail())
-                        .deviceId(entry.getDeviceId())
-                        .ipAddress(entry.getIpAddress())
-                        .userAgent(entry.getUserAgent())
-                        .location(entry.getLocation())
-                        .details(entry.getDetails())
-                        .occurredAt(entry.getOccurredAt())
-                        .build());
+                .map(entry -> {
+                    var dm = entry.getDeviceMetadata();
+                    return AuditHistoryResponse.builder()
+                            .eventType(entry.getEventType())
+                            .outcome(entry.getOutcome())
+                            .userEmail(entry.getUserEmail())
+                            .registrationStatus(entry.getRegistrationStatus())
+                            .details(entry.getDetails())
+                            .occurredAt(entry.getOccurredAt())
+                            .deviceId(dm != null ? dm.getDeviceId() : null)
+                            .deviceInfo(dm != null ? buildDeviceInfo(dm) : null)
+                            .build();
+                });
     }
 
     private void persistSafely(AuditWriteRequest request) {
@@ -112,7 +126,8 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
             template.executeWithoutResult(status -> persist(request));
         } catch (Exception ex) {
             // Audit is best-effort and should never fail the caller's API flow.
-            log.warn("Failed to persist audit history eventType={} userEmail={}", request.eventType, request.userEmail, ex);
+            log.warn("Failed to persist audit history eventType={} userEmail={}",
+                    request.eventType, LogSanitizer.maskEmail(request.userEmail), ex);
         }
     }
 
@@ -122,15 +137,18 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
             userRef = entityManager.getReference(User.class, request.userId);
         }
 
+        DeviceMetadata deviceRef = null;
+        if (request.deviceMetadataId != null) {
+            deviceRef = entityManager.getReference(DeviceMetadata.class, request.deviceMetadataId);
+        }
+
         AuditHistory model = AuditHistory.builder()
                 .user(userRef)
+                .deviceMetadata(deviceRef)
                 .eventType(request.eventType)
                 .outcome(request.outcome)
                 .userEmail(request.userEmail)
-                .deviceId(request.deviceId)
-                .ipAddress(request.ipAddress)
-                .userAgent(request.userAgent)
-                .location(request.location)
+                .registrationStatus(request.registrationStatus)
                 .details(request.details)
                 .occurredAt(LocalDateTime.now(clock))
                 .build();
@@ -157,38 +175,20 @@ public class AuditHistoryServiceImpl implements AuditHistoryService {
         return trimmed.length() > maxLength ? trimmed.substring(0, maxLength) : trimmed;
     }
 
-    private static final class AuditWriteRequest {
-        private final AuditEventType eventType;
-        private final AuditOutcome outcome;
-        private final UUID userId;
-        private final String userEmail;
-        private final String deviceId;
-        private final String ipAddress;
-        private final String userAgent;
-        private final String location;
-        private final String details;
+    /** Builds "Browser on OS" from DeviceMetadata, e.g. "Chrome on Windows". */
+    private String buildDeviceInfo(DeviceMetadata dm) {
+        String browser = dm.getBrowser();
+        String os = dm.getOs();
+        boolean hasBrowser = browser != null && !browser.isBlank() && !"Unknown".equalsIgnoreCase(browser);
+        boolean hasOs = os != null && !os.isBlank() && !"Unknown".equalsIgnoreCase(os);
+        if (hasBrowser && hasOs) return browser + " on " + os;
+        if (hasBrowser) return browser;
+        if (hasOs) return os;
+        return dm.getDeviceType() != null ? dm.getDeviceType().name() : null;
+    }
 
-        private AuditWriteRequest(
-                AuditEventType eventType,
-                AuditOutcome outcome,
-                UUID userId,
-                String userEmail,
-                String deviceId,
-                String ipAddress,
-                String userAgent,
-                String location,
-                String details
-        ) {
-            this.eventType = eventType;
-            this.outcome = outcome;
-            this.userId = userId;
-            this.userEmail = userEmail;
-            this.deviceId = deviceId;
-            this.ipAddress = ipAddress;
-            this.userAgent = userAgent;
-            this.location = location;
-            this.details = details;
-        }
+    private record AuditWriteRequest(AuditEventType eventType, AuditOutcome outcome, UUID userId, String userEmail,
+                                     RegistrationStatus registrationStatus, String details, Long deviceMetadataId) {
     }
 }
 

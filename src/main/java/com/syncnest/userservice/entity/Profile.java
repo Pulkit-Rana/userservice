@@ -16,8 +16,8 @@ import java.time.LocalDateTime;
 @Setter
 public class Profile extends BaseEntity{
 
-    @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name="user_id", unique = true)
+    @OneToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name="user_id", unique = true, nullable = false)
     @ToString.Exclude
     @EqualsAndHashCode.Exclude
     private User user;
@@ -49,6 +49,9 @@ public class Profile extends BaseEntity{
     @Column(length = 10)
     private String zipCode;
 
+    /** Google and other providers may return long CDN URLs. */
+    @Size(max = 2048)
+    @Column(length = 2048)
     private String profilePictureUrl;
 
 }

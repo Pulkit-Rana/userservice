@@ -12,10 +12,18 @@ import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import java.time.LocalDateTime;
 
+/**
+ * Tracks user login / registration / OTP-verification activity.
+ * Device-specific info (IP, UA, browser, OS, location) is captured
+ * in {@link DeviceMetadata}; this table focuses on <em>what</em> and
+ * <em>when</em> something happened for a user, plus registration lifecycle status.
+ */
 @Entity
 @Table(name = "audit_history", indexes = {
+        @Index(name = "ix_audit_user_id_time", columnList = "user_id, occurred_at"),
         @Index(name = "ix_audit_user_email_time", columnList = "user_email, occurred_at"),
-        @Index(name = "ix_audit_type_time", columnList = "event_type, occurred_at")
+        @Index(name = "ix_audit_type_time", columnList = "event_type, occurred_at"),
+        @Index(name = "ix_audit_device_meta", columnList = "device_metadata_id")
 })
 @Getter
 @Setter
@@ -43,9 +51,18 @@ public class AuditHistory extends BaseEntity {
     @Column(name = "modified_by", insertable = false)
     private String modifiedBy;
 
+    /** The user this activity belongs to (nullable for pre-registration events). */
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id")
     private User user;
+
+    /**
+     * The device this activity occurred on (nullable — set when device context is available).
+     * Enables: RefreshToken → DeviceMetadata → AuditHistory chain.
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "device_metadata_id")
+    private DeviceMetadata deviceMetadata;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "event_type", nullable = false, length = 40)
@@ -58,17 +75,13 @@ public class AuditHistory extends BaseEntity {
     @Column(name = "user_email", nullable = false, length = 320)
     private String userEmail;
 
-    @Column(name = "device_id", length = 64)
-    private String deviceId;
-
-    @Column(name = "ip_address", length = 45)
-    private String ipAddress;
-
-    @Column(name = "user_agent", length = 255)
-    private String userAgent;
-
-    @Column(name = "location", length = 255)
-    private String location;
+    /**
+     * Registration lifecycle status — set on REGISTRATION / OTP_VERIFICATION events
+     * to track where the user is in the sign-up funnel.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "registration_status", length = 20)
+    private RegistrationStatus registrationStatus;
 
     @Column(name = "details", length = 500)
     private String details;

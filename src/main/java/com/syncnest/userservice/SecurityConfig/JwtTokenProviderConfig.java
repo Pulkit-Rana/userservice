@@ -166,4 +166,34 @@ public class JwtTokenProviderConfig {
     public int getTokenValiditySeconds() {
         return jwtExpiration / 1000;
     }
+
+    /** Issuer string used in JWTs and in revocation-fence Redis keys (empty if iss is not configured). */
+    public String getConfiguredIssuer() {
+        return (issuerOpt != null && !issuerOpt.isBlank()) ? issuerOpt : "";
+    }
+
+    /**
+     * Iss claim for fence checks — empty when the token has no iss (must match {@link #getConfiguredIssuer()}).
+     */
+    public String extractIssOrEmpty(String token) {
+        try {
+            String iss = extractClaim(token, Claims::getIssuer);
+            return (iss != null && !iss.isBlank()) ? iss : "";
+        } catch (IllegalArgumentException e) {
+            return "";
+        }
+    }
+
+    /** issued-at, seconds since epoch; 0 if missing or unparseable. */
+    public long extractIssuedAtEpochSeconds(String token) {
+        try {
+            var iat = extractClaim(token, Claims::getIssuedAt);
+            if (iat == null) {
+                return 0L;
+            }
+            return iat.toInstant().getEpochSecond();
+        } catch (IllegalArgumentException e) {
+            return 0L;
+        }
+    }
 }

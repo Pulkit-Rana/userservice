@@ -6,21 +6,25 @@ import com.syncnest.userservice.entity.User;
 import com.syncnest.userservice.exception.PasswordExceptions;
 import com.syncnest.userservice.repository.UserRepository;
 import com.syncnest.userservice.service.AuditHistoryService;
+import com.syncnest.userservice.security.ShortCodeHasher;
 import com.syncnest.userservice.service.PasswordResetService;
 import com.syncnest.userservice.service.RefreshTokenService;
 import com.syncnest.userservice.utils.EmailTemplate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.security.core.token.Sha512DigestUtils;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.concurrent.ThreadLocalRandom;
+
+import static com.syncnest.userservice.logging.LogSanitizer.maskEmail;
 
 @Slf4j
 @Service
@@ -33,6 +37,9 @@ public class PasswordResetServiceImpl implements PasswordResetService {
     private final RefreshTokenService refreshTokenService;
     private final AuditHistoryService auditHistoryService;
     private final EmailTemplate emailTemplate;
+    private final ShortCodeHasher shortCodeHasher;
+
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private static final String RESET_PREFIX = "pwd:reset:";
     private static final Duration RESET_CODE_TTL = Duration.ofMinutes(10);
@@ -59,9 +66,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                     null,
                     email,
                     null,
-                    ipAddress,
-                    userAgent,
-                    null,
                     "PASSWORD_RESET_REQUEST_COOLDOWN"
             );
             throw new PasswordExceptions.ResetRequestRateLimited("Too many reset requests. Please wait 10 minutes and try again.");
@@ -72,9 +76,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                     AuditOutcome.FAILURE,
                     null,
                     email,
-                    null,
-                    ipAddress,
-                    userAgent,
                     null,
                     "PASSWORD_RESET_REQUEST_RESEND_LOCK"
             );
@@ -89,9 +90,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                     AuditOutcome.FAILURE,
                     null,
                     email,
-                    null,
-                    ipAddress,
-                    userAgent,
                     null,
                     "PASSWORD_RESET_REQUEST_LIMIT_REACHED"
             );
@@ -108,17 +106,14 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                     null,
                     email,
                     null,
-                    ipAddress,
-                    userAgent,
-                    null,
                     "PASSWORD_RESET_USER_NOT_FOUND"
             );
             return;
         }
 
         User user = userOpt.get();
-        String resetCode = String.format("%06d", ThreadLocalRandom.current().nextInt(0, 1_000_000));
-        String hashed = Sha512DigestUtils.shaHex(resetCode);
+        String resetCode = String.format("%06d", SECURE_RANDOM.nextInt(1_000_000));
+        String hashed = shortCodeHasher.hmacHex(resetCode);
 
         redisTemplate.opsForValue().set(keyCode(email), hashed, RESET_CODE_TTL);
         redisTemplate.opsForValue().set(keyAttempts(email), "0", RESET_CODE_TTL);
@@ -132,9 +127,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                     user,
                     email,
                     null,
-                    ipAddress,
-                    userAgent,
-                    null,
                     "PASSWORD_RESET_EMAIL_DELIVERY_FAILED"
             );
             throw new PasswordExceptions.PasswordResetFailed("Failed to send reset email. Please try again.");
@@ -145,9 +137,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                 AuditOutcome.SUCCESS,
                 user,
                 email,
-                null,
-                ipAddress,
-                userAgent,
                 null,
                 "PASSWORD_RESET_CODE_SENT"
         );
@@ -175,16 +164,15 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                     null,
                     email,
                     null,
-                    ipAddress,
-                    userAgent,
-                    null,
                     "PASSWORD_RESET_CODE_EXPIRED"
             );
             throw new PasswordExceptions.ResetCodeExpired("Reset code expired or not found. Please request a new code.");
         }
 
-        String enteredHash = Sha512DigestUtils.shaHex(resetCode);
-        if (!enteredHash.equals(storedHash)) {
+        String enteredHash = shortCodeHasher.hmacHex(resetCode.trim());
+        if (!MessageDigest.isEqual(
+                storedHash.getBytes(StandardCharsets.UTF_8),
+                enteredHash.getBytes(StandardCharsets.UTF_8))) {
             int attempts = incrementAttempts(email);
             if (attempts >= MAX_VERIFY_ATTEMPTS) {
                 clearKeys(email);
@@ -195,9 +183,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                         null,
                         email,
                         null,
-                        ipAddress,
-                        userAgent,
-                        null,
                         "PASSWORD_RESET_MAX_ATTEMPTS"
                 );
                 throw new PasswordExceptions.TooManyResetAttempts("Too many invalid reset attempts. Please request a new reset code later.");
@@ -207,9 +192,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                     AuditOutcome.FAILURE,
                     null,
                     email,
-                    null,
-                    ipAddress,
-                    userAgent,
                     null,
                     "PASSWORD_RESET_CODE_INVALID"
             );
@@ -234,9 +216,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
                 AuditOutcome.SUCCESS,
                 user,
                 email,
-                null,
-                ipAddress,
-                userAgent,
                 null,
                 "PASSWORD_RESET_SUCCESS"
         );
@@ -271,13 +250,6 @@ public class PasswordResetServiceImpl implements PasswordResetService {
             throw new PasswordExceptions.InvalidResetRequest("Email must be provided.");
         }
         return email.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private String maskEmail(String email) {
-        if (email == null || email.length() < 3) return "***";
-        int atIndex = email.indexOf('@');
-        if (atIndex <= 1) return "***@***";
-        return email.charAt(0) + "***" + email.substring(atIndex);
     }
 }
 

@@ -66,6 +66,7 @@ public enum ErrorCode {
     TOKEN_008("TOKEN_008", "Token hashing failed", "Internal error: Unable to process token"),
     TOKEN_009("TOKEN_009", "Session invalid", "Your session is invalid. Please login again"),
     TOKEN_010("TOKEN_010", "Refresh token required", "Refresh token is required for this operation"),
+    TOKEN_011("TOKEN_011", "Replay attack detected", "Suspicious token reuse detected. All sessions revoked for safety"),
 
     // =============== USER ERRORS (USER_*) ===============
     USER_001("USER_001", "User not found", "User account not found"),

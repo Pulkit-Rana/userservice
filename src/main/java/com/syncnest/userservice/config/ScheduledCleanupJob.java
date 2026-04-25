@@ -36,7 +36,8 @@ public class ScheduledCleanupJob {
     }
 
     /**
-     * Runs daily at 04:00 AM — cleans up expired and revoked refresh tokens.
+     * Runs daily at 04:00 AM — removes refresh token rows only after their {@code expiresAt} (revoked
+     * but not yet expired rows are kept for rotation replay detection).
      */
     @Scheduled(cron = "${refresh-token.purge-cron:0 0 4 * * ?}")
     public void purgeExpiredRefreshTokens() {

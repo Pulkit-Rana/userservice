@@ -55,7 +55,7 @@ public class User extends BaseEntity implements UserDetails, Principal, Serializ
     @Builder.Default
     private UserRole role = UserRole.ROLE_USER;
 
-    @OneToOne(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
+    @OneToOne(mappedBy = "user", cascade = {CascadeType.PERSIST, CascadeType.MERGE}, orphanRemoval = true, fetch = FetchType.LAZY)
     @ToString.Exclude
     @EqualsAndHashCode.Exclude
     private Profile profile;
@@ -72,10 +72,23 @@ public class User extends BaseEntity implements UserDetails, Principal, Serializ
     @Column(nullable = false)
     private boolean enabled = true;
 
-    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
+    /** All devices this user has logged in from. */
+    @OneToMany(mappedBy = "user")
     @ToString.Exclude
     @EqualsAndHashCode.Exclude
     private Set<DeviceMetadata> devices;
+
+    /** All refresh-token sessions for this user. */
+    @OneToMany(mappedBy = "user")
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private Set<RefreshToken> refreshTokens;
+
+    /** User activity / audit trail (logins, registrations, OTP events, etc.). */
+    @OneToMany(mappedBy = "user")
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private Set<AuditHistory> auditHistory;
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {

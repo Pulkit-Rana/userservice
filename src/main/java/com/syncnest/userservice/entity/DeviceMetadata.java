@@ -5,10 +5,14 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.LocalDateTime;
+import java.util.Set;
 
 @Entity
 @Table(
         name = "device_metadata",
+        uniqueConstraints = {
+                @UniqueConstraint(name = "uk_dm_user_device_id", columnNames = {"user_id", "device_id"})
+        },
         indexes = {
                 @Index(name = "ix_dm_user_id",        columnList = "user_id"),
                 @Index(name = "ix_dm_user_device_id", columnList = "user_id, device_id")
@@ -30,7 +34,7 @@ public class DeviceMetadata {
     private User user;
 
     /** Client-supplied deviceId, or a server-generated UA fingerprint prefixed with "fp-". */
-    @Column(name = "device_id", length = 64)
+    @Column(name = "device_id", nullable = false, length = 64)
     private String deviceId;
 
     /** Real client IP extracted server-side (X-Forwarded-For → RemoteAddr). */
@@ -73,4 +77,23 @@ public class DeviceMetadata {
     @Column(name = "last_login_at")
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime lastLoginAt;
+
+    /**
+     * All refresh tokens issued for this device.
+     * Allows querying active sessions per device and revoking them.
+     */
+    @OneToMany(mappedBy = "deviceMetadata")
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private Set<RefreshToken> refreshTokens;
+
+    /**
+     * All audit events that occurred on this device.
+     * Enables: User → DeviceMetadata → AuditHistory and
+     *          RefreshToken → DeviceMetadata → AuditHistory chains.
+     */
+    @OneToMany(mappedBy = "deviceMetadata")
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private Set<AuditHistory> auditHistory;
 }
